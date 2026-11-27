@@ -40,7 +40,7 @@ const NOUNS = [
   "nexus", "orbit", "prism", "pulse", "quill", "vault",
 ];
 
-function generateRandomHandle(): string {
+function generateRandomUsername(): string {
   const arr = new Uint32Array(3);
   crypto.getRandomValues(arr);
   const adj = ADJECTIVES[arr[0] % ADJECTIVES.length];
@@ -255,7 +255,7 @@ export default function HomePage() {
           <div className="lg:col-span-7 space-y-6">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#161b22] border border-[#2b323d] text-xs text-[#9ca3af]">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Anonymous accounts • Zero email • Client-side encrypted
+              Zero-knowledge • Zero email • Client-side encrypted
             </div>
 
             <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-white leading-[1.12]">
@@ -267,7 +267,7 @@ export default function HomePage() {
             </h1>
 
             <p className="text-[#8b949e] text-base leading-relaxed max-w-xl">
-              Sign in with an anonymous handle and master password to access all your
+              Sign in with your username and master password to access all your
               encrypted notes, folders, and tabs across every device. Powered by Turso
               SQLite and split-key AES-256-GCM encryption.
             </p>
@@ -354,12 +354,12 @@ export default function HomePage() {
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-xs font-medium text-[#c9d1d9]">
-                      Anonymous Handle
+                      Username
                     </label>
                     {mode === "register" ? (
                       <button
                         type="button"
-                        onClick={() => setUsername(generateRandomHandle())}
+                        onClick={() => setUsername(generateRandomUsername())}
                         className="text-[11px] text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
                       >
                         <Shuffle className="w-3 h-3" />
@@ -373,7 +373,7 @@ export default function HomePage() {
                       type="text"
                       value={username}
                       onChange={(e) => setUsername(sanitizeUsername(e.target.value))}
-                      placeholder="your-handle"
+                      placeholder="your-username"
                       autoFocus
                       required
                       autoComplete="username"
@@ -436,7 +436,7 @@ export default function HomePage() {
                   ) : mode === "register" ? (
                     <>
                       <UserPlus className="w-4 h-4" />
-                      <span>Create Anonymous Vault</span>
+                      <span>Create Account</span>
                     </>
                   ) : (
                     <>

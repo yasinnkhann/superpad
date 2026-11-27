@@ -4,7 +4,7 @@
 
 🚀 **Live App:** [https://superpad.vercel.app](https://superpad.vercel.app)
 
-Sign in with an anonymous handle and master password (no email, no OAuth) to manage all your end-to-end encrypted folders, notes, and code tabs across every device.
+Sign in with your username and master password (no email, no OAuth) to manage all your end-to-end encrypted folders, notes, and code tabs across every device.
 
 ---
 
@@ -40,7 +40,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), create an anonymous handle, and start writing!
+Open [http://localhost:3000](http://localhost:3000), choose a username, and start writing!
 
 ## Production Deployment (Vercel + Turso)
 

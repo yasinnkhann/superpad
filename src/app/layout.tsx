@@ -17,7 +17,7 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "SuperPad — Zero-Knowledge Notepad++ for the Web",
   description:
-    "Anonymous, client-side AES-256-GCM encrypted multi-tab notepad with CodeMirror 6, boolean block scanner, regex find & replace, split view, and encrypted cloud backups.",
+    "Client-side AES-256-GCM encrypted multi-tab notepad with CodeMirror 6, boolean block scanner, regex find & replace, split view, and encrypted cloud backups.",
 };
 
 export default function RootLayout({

@@ -77,7 +77,7 @@ export async function POST(request: Request) {
       if (msg.includes("UNIQUE") || msg.includes("unique")) {
         metric("superpad.auth.register", 1, { outcome: "conflict", backend });
         return NextResponse.json(
-          { error: "That username is already taken. Try another handle." },
+          { error: "That username is already taken. Please choose another username." },
           { status: 409 }
         );
       }
