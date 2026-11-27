@@ -297,18 +297,25 @@ export default function FileSidebar({
             type="button"
             onClick={() => onCreateNote("")}
             title="New Note"
-            className="p-1 rounded text-[#8b949e] hover:bg-[#1c222b] hover:text-emerald-400 cursor-pointer"
+            className="p-1 rounded text-[#8b949e] border border-transparent hover:bg-[#1c222b] hover:text-emerald-400 cursor-pointer"
           >
             <FilePlus className="w-3.5 h-3.5" />
           </button>
           <button
             type="button"
+            disabled={creatingFolder}
             onClick={() => {
-              setCreatingFolder((v) => !v);
-              setNewFolderName("");
+              if (!creatingFolder) {
+                setCreatingFolder(true);
+                setNewFolderName("");
+              }
             }}
-            title="New Folder"
-            className="p-1 rounded text-[#8b949e] hover:bg-[#1c222b] hover:text-sky-400 cursor-pointer"
+            title={creatingFolder ? "Creating folder..." : "New Folder"}
+            className={`p-1 rounded transition-colors ${
+              creatingFolder
+                ? "text-sky-400 bg-[#1c222b] border border-sky-400 ring-1 ring-sky-400/40 cursor-default"
+                : "text-[#8b949e] border border-transparent hover:bg-[#1c222b] hover:text-sky-400 cursor-pointer"
+            }`}
           >
             <FolderPlus className="w-3.5 h-3.5" />
           </button>
@@ -316,7 +323,7 @@ export default function FileSidebar({
             type="button"
             onClick={onTriggerImport}
             title="Import Files"
-            className="p-1 rounded text-[#8b949e] hover:bg-[#1c222b] hover:text-white cursor-pointer"
+            className="p-1 rounded text-[#8b949e] border border-transparent hover:bg-[#1c222b] hover:text-white cursor-pointer"
           >
             <Upload className="w-3.5 h-3.5" />
           </button>
@@ -354,7 +361,7 @@ export default function FileSidebar({
                 setNewFolderName("");
               }
             }}
-            className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#131820] border border-sky-500/50"
+            className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#131820] border border-sky-400 ring-1 ring-sky-400/30"
           >
             <Folder className="w-3 h-3 text-sky-400 shrink-0" />
             <input
