@@ -272,6 +272,18 @@ export default function VaultWorkspace() {
       setNotes(mergedNotes);
       setSavedSnapshots(snapMap);
 
+      if (typeof window !== "undefined") {
+        try {
+          const savedFolders = localStorage.getItem(`superpad:v2:folders:${authUser.username}`);
+          if (savedFolders) {
+            const parsed = JSON.parse(savedFolders);
+            if (Array.isArray(parsed)) {
+              setExtraFolders(parsed);
+            }
+          }
+        } catch {}
+      }
+
       if (mergedNotes.length > 0) {
         const first = mergedNotes[0];
         setOpenTabIds([first.id]);
@@ -717,6 +729,52 @@ export default function VaultWorkspace() {
     const updated: NoteRecord = { ...target, pinned: !target.pinned, updatedAt: Date.now() };
     setNotes((prev) => prev.map((n) => (n.id === noteId ? updated : n)));
     void saveNoteById(noteId, { noteOverride: updated });
+  };
+
+  const handleCreateFolder = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setExtraFolders((prev) => {
+      const next = prev.includes(trimmed) ? prev : [...prev, trimmed];
+      if (user?.username && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`superpad:v2:folders:${user.username}`, JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteFolder = (folderName: string) => {
+    const notesInFolder = notes.filter((n) => n.folder === folderName);
+    if (notesInFolder.length > 0) {
+      if (
+        !window.confirm(
+          `Delete folder "${folderName}"? ${notesInFolder.length} note${
+            notesInFolder.length === 1 ? "" : "s"
+          } inside will be moved to root.`
+        )
+      ) {
+        return;
+      }
+      for (const note of notesInFolder) {
+        const updated: NoteRecord = { ...note, folder: "", updatedAt: Date.now() };
+        setNotes((prev) => prev.map((n) => (n.id === note.id ? updated : n)));
+        void saveNoteById(note.id, { noteOverride: updated });
+      }
+    }
+
+    setExtraFolders((prev) => {
+      const next = prev.filter((f) => f !== folderName);
+      if (user?.username && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`superpad:v2:folders:${user.username}`, JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+
+    showToast(`Deleted folder "${folderName}"`, "info");
   };
 
   // Drag & Drop / File Picker Import
@@ -1464,9 +1522,8 @@ export default function VaultWorkspace() {
           totalBytes={totalAccountBytes}
           onSelectNote={handleSelectNote}
           onCreateNote={(folder) => void createNoteOnServer(undefined, "", folder ?? "")}
-          onCreateFolder={(name) =>
-            setExtraFolders((prev) => (prev.includes(name) ? prev : [...prev, name]))
-          }
+          onCreateFolder={handleCreateFolder}
+          onDeleteFolder={handleDeleteFolder}
           onRenameNote={handleRenameNote}
           onMoveNoteToFolder={handleMoveNoteToFolder}
           onTogglePinNote={handleTogglePinNote}

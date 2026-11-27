@@ -31,6 +31,7 @@ interface FileSidebarProps {
   onSelectNote: (noteId: string) => void;
   onCreateNote: (folder?: string) => void;
   onCreateFolder: (folderName: string) => void;
+  onDeleteFolder: (folderName: string) => void;
   onRenameNote: (noteId: string, newTitle: string) => void;
   onMoveNoteToFolder: (noteId: string, folder: string) => void;
   onTogglePinNote: (noteId: string) => void;
@@ -49,6 +50,7 @@ export default function FileSidebar({
   onSelectNote,
   onCreateNote,
   onCreateFolder,
+  onDeleteFolder,
   onRenameNote,
   onMoveNoteToFolder,
   onTogglePinNote,
@@ -432,17 +434,30 @@ export default function FileSidebar({
                         {items.length}
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onCreateNote(folderName);
-                      }}
-                      title={`New note inside ${folderName}`}
-                      className="p-0.5 rounded text-[#6e7681] hover:text-emerald-400 opacity-0 group-hover:opacity-100 cursor-pointer"
-                    >
-                      <FilePlus className="w-3 h-3" />
-                    </button>
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onCreateNote(folderName);
+                        }}
+                        title={`New note inside ${folderName}`}
+                        className="p-0.5 rounded text-[#6e7681] hover:text-emerald-400 hover:bg-[#262f3f] cursor-pointer"
+                      >
+                        <FilePlus className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteFolder(folderName);
+                        }}
+                        title={`Delete folder "${folderName}"`}
+                        className="p-0.5 rounded text-[#6e7681] hover:text-rose-400 hover:bg-[#262f3f] cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                   {!collapsed ? (
                     <div className="mt-0.5 space-y-0.5">
