@@ -140,6 +140,42 @@ describe("Boolean Block Scanner & Text Transforms", () => {
     expect(sampleA.slice(blocks[1].startOffset, blocks[1].endOffset)).toBe(blocks[1].content);
   });
 
+  it("extracts and scans large notes (>600KB) in milliseconds without freezing", () => {
+    // Generate >600KB text mimicking large introspects.txt with 4,000 paragraphs
+    const paragraphs = Array.from(
+      { length: 4000 },
+      (_, i) =>
+        `Paragraph ${i + 1} with extra details, timestamps, reflections, and notes for indexing benchmark.\nLine two for entry ${i + 1} with additional annotations, tags, and context.`
+    );
+    const largeText = paragraphs.join("\n\n");
+    expect(largeText.length).toBeGreaterThan(600000);
+
+    const start = performance.now();
+    const blocks = extractParagraphBlocks(largeText);
+    const duration = performance.now() - start;
+
+    expect(blocks).toHaveLength(4000);
+    // Line numbers must be accurate: each paragraph has 2 lines + 1 blank separator = 3 lines per paragraph
+    expect(blocks[0].lineNumber).toBe(1);
+    expect(blocks[1].lineNumber).toBe(4);
+    expect(blocks[2].lineNumber).toBe(7);
+    expect(blocks[3999].lineNumber).toBe(1 + 3999 * 3);
+    // Performance must be sub-150ms (previously took >6000ms with nested charCodeAt loop)
+    expect(duration).toBeLessThan(150);
+
+    const largeNote = makeNote("n-large", "introspects.txt", "", largeText);
+    const scanStart = performance.now();
+    const res = runBooleanScanner([largeNote], ["n-large"], "n-large", {
+      all: "Paragraph 100",
+      any: "",
+      exclude: "",
+      scope: "current",
+    });
+    const scanDuration = performance.now() - scanStart;
+    expect(res.matches.length).toBeGreaterThan(0);
+    expect(scanDuration).toBeLessThan(100);
+  });
+
   it("scans current tab, open tabs, and all account notes with AND / OR / NOT", () => {
     const n1 = makeNote("n1", "notes.txt", "Personal", sampleA);
     const n2 = makeNote("n2", "work.txt", "Work", "Alpha Beta Delta\n\nOther block");

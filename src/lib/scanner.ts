@@ -16,10 +16,22 @@ interface IndexedBlock {
   lineNumber: number;
 }
 
+interface CachedNoteBlocks {
+  contentLength: number;
+  version?: number;
+  sample: string;
+  blocks: IndexedBlock[];
+}
+
+const noteBlocksCache = new Map<string, CachedNoteBlocks>();
+
 /**
  * Splits note text into paragraph blocks separated by one or more blank lines
  * (matching Python `re.split(r"\n\s*\n", content)`), while tracking exact
  * character offsets and 1-based starting line numbers for instant Jump-To.
+ *
+ * Performance note: uses an O(N) single-pass cursor to track line numbers
+ * monotonically without re-scanning characters from offset 0 for every block.
  */
 export function extractParagraphBlocks(text: string): IndexedBlock[] {
   const blocks: IndexedBlock[] = [];
@@ -27,20 +39,31 @@ export function extractParagraphBlocks(text: string): IndexedBlock[] {
 
   const separator = /\n[ \t]*\n/g;
   let lastIndex = 0;
+  let currentLine = 1;
+  let cursorCharIndex = 0;
+
+  const advanceCursorTo = (targetIndex: number) => {
+    while (cursorCharIndex < targetIndex) {
+      if (text.charCodeAt(cursorCharIndex) === 10) currentLine++;
+      cursorCharIndex++;
+    }
+  };
 
   const pushSlice = (rawStart: number, rawEnd: number) => {
     const slice = text.slice(rawStart, rawEnd);
     const trimmed = slice.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      advanceCursorTo(rawEnd);
+      return;
+    }
 
     const leadingWs = slice.length - slice.trimStart().length;
     const startOffset = rawStart + leadingWs;
     const endOffset = startOffset + trimmed.length;
 
-    let lineNumber = 1;
-    for (let i = 0; i < startOffset; i++) {
-      if (text.charCodeAt(i) === 10) lineNumber++;
-    }
+    advanceCursorTo(startOffset);
+    const lineNumber = currentLine;
+    advanceCursorTo(rawEnd);
 
     const flattened = trimmed
       .split("\n")
@@ -59,9 +82,38 @@ export function extractParagraphBlocks(text: string): IndexedBlock[] {
   let match: RegExpExecArray | null;
   while ((match = separator.exec(text)) !== null) {
     pushSlice(lastIndex, match.index);
+    advanceCursorTo(match.index + match[0].length);
     lastIndex = match.index + match[0].length;
   }
   pushSlice(lastIndex, text.length);
+
+  return blocks;
+}
+
+export function getCachedOrExtractNoteBlocks(note: NoteRecord): IndexedBlock[] {
+  const sample = note.content.slice(0, 64);
+  const cached = noteBlocksCache.get(note.id);
+  if (
+    cached &&
+    cached.contentLength === note.content.length &&
+    cached.version === note.version &&
+    cached.sample === sample
+  ) {
+    return cached.blocks;
+  }
+
+  const blocks = extractParagraphBlocks(note.content);
+  noteBlocksCache.set(note.id, {
+    contentLength: note.content.length,
+    version: note.version,
+    sample,
+    blocks,
+  });
+
+  if (noteBlocksCache.size > 100) {
+    const oldestKey = noteBlocksCache.keys().next().value;
+    if (oldestKey) noteBlocksCache.delete(oldestKey);
+  }
 
   return blocks;
 }
@@ -96,7 +148,7 @@ export function runBooleanScanner(
   const matches: ScannerMatch[] = [];
 
   for (const note of targetNotes) {
-    const blocks = extractParagraphBlocks(note.content);
+    const blocks = getCachedOrExtractNoteBlocks(note);
     totalBlocks += blocks.length;
 
     if (!hasCriteria) continue;
