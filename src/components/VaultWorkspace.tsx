@@ -558,11 +558,16 @@ export default function VaultWorkspace() {
     [encryptionKey, notes.length, showToast]
   );
 
-  const handleDeleteNote = async (noteId: string) => {
+  const handleDeleteNote = async (noteId: string, skipConfirm = false) => {
     const target = notesById.get(noteId);
     if (!target) return;
-    if (!window.confirm(`Permanently delete "${target.title}" and its backup history?`)) {
-      return;
+
+    // Never prompt confirmation for empty/untouched notes
+    const isEmpty = !target.content || target.content.trim() === "";
+    if (!skipConfirm && !isEmpty) {
+      if (!window.confirm(`Permanently delete "${target.title}" and its backup history?`)) {
+        return;
+      }
     }
     try {
       const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}`, {
@@ -610,6 +615,21 @@ export default function VaultWorkspace() {
         return;
       }
     }
+
+    // If an untouched, empty note is closed, automatically clean it up so empty ghost notes don't linger
+    const isUntouchedEmpty =
+      target &&
+      (!target.content || target.content.trim() === "") &&
+      target.version === 1 &&
+      !target.pinned &&
+      target.folder === "" &&
+      !dirtyNoteIds.has(noteId);
+
+    if (isUntouchedEmpty) {
+      void handleDeleteNote(noteId, true);
+      return;
+    }
+
     setOpenTabIds((prev) => {
       const idx = prev.indexOf(noteId);
       const remaining = prev.filter((id) => id !== noteId);
