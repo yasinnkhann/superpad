@@ -201,6 +201,10 @@ export default function VaultWorkspace() {
   const [goToLineInput, setGoToLineInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [historyDepth, setHistoryDepth] = useState<{ canUndo: boolean; canRedo: boolean }>({
+    canUndo: false,
+    canRedo: false,
+  });
 
   // Refs
   const primaryEditorRef = useRef<CodeEditorHandle | null>(null);
@@ -321,24 +325,11 @@ export default function VaultWorkspace() {
         snapMap.set(n.id, serializeNoteForDiff(n));
       }
 
-      // Check IndexedDB for any encrypted unsaved crash-recovery drafts
-      const drafts = await loadEncryptedDrafts(authUser.id, key);
-      let recoveredCount = 0;
-      const mergedNotes = decrypted.map((note) => {
-        const draft = drafts.find((d) => d.noteId === note.id);
-        if (draft && draft.updatedAt > note.updatedAt) {
-          recoveredCount++;
-          return {
-            ...note,
-            ...draft.meta,
-            content: draft.content,
-            sizeBytes: new TextEncoder().encode(draft.content).length,
-          };
-        }
-        return note;
-      });
+      // Hard refresh or page reload strictly reverts to the last saved cloud snapshot
+      // Clean up any stale IndexedDB crash-recovery drafts so unsaved edits do not haunt reloads
+      void clearUserDrafts(authUser.id);
 
-      setNotes(mergedNotes);
+      setNotes(decrypted);
       setTrashedNotes(decryptedTrash);
       setSavedSnapshots(snapMap);
 
@@ -361,7 +352,7 @@ export default function VaultWorkspace() {
           const rawWs = localStorage.getItem(getWorkspaceStorageKey(authUser.username));
           if (rawWs) {
             const parsedWs = JSON.parse(rawWs) as Partial<PersistedWorkspace>;
-            const validIds = new Set(mergedNotes.map((n) => n.id));
+            const validIds = new Set(decrypted.map((n) => n.id));
             if (Array.isArray(parsedWs.openTabIds)) {
               restoredTabs = parsedWs.openTabIds.filter(
                 (id): id is string => typeof id === "string" && validIds.has(id)
@@ -389,8 +380,8 @@ export default function VaultWorkspace() {
         setOpenTabIds(restoredTabs);
         setActiveNoteId(restoredActive ?? restoredTabs[0]);
         setSplitNoteId(restoredSplit);
-      } else if (mergedNotes.length > 0) {
-        const first = mergedNotes[0];
+      } else if (decrypted.length > 0) {
+        const first = decrypted[0];
         setOpenTabIds([first.id]);
         setActiveNoteId(first.id);
         setSplitNoteId(null);
@@ -402,15 +393,8 @@ export default function VaultWorkspace() {
       setLockNotice("");
       lastActivityAtRef.current = Date.now();
       setPhase("ready");
-
-      if (recoveredCount > 0) {
-        showToast(
-          `Recovered ${recoveredCount} unsaved local draft(s) from crash recovery`,
-          "info"
-        );
-      }
     },
-    [router, showToast]
+    [router]
   );
 
   // Persist open tabs, active tab, split tab, and collapsed folders across reloads
@@ -1657,7 +1641,7 @@ export default function VaultWorkspace() {
         id: "redo",
         label: "Redo",
         hint: "Redo last undone edit or replace",
-        shortcut: "⌘⇧Z",
+        shortcut: "⌘Y / ⌘⇧Z",
         icon: "history",
         run: () => {
           const ed = getFocusedEditor();
@@ -2093,7 +2077,7 @@ export default function VaultWorkspace() {
                     <Redo2 className="w-3.5 h-3.5 text-sky-400" />
                     Redo
                   </span>
-                  <span className="text-[10px] font-mono text-[#6e7681]">⌘⇧Z</span>
+                  <span className="text-[10px] font-mono text-[#6e7681]">⌘Y</span>
                 </button>
                 <hr className="my-1 border-[#262e3a]" />
                 <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#6e7681]">
@@ -2509,6 +2493,8 @@ export default function VaultWorkspace() {
               open={findOpen}
               initialShowReplace={findShowReplace}
               summary={findSummary}
+              canUndo={historyDepth.canUndo}
+              canRedo={historyDepth.canRedo}
               onOptionsChange={handleFindOptionsChange}
               onStep={(opts, dir) => {
                 const ed = getFocusedEditor();
@@ -2550,6 +2536,18 @@ export default function VaultWorkspace() {
                     showToast("Undid replacement", "info");
                   } else {
                     showToast("Nothing to undo", "info");
+                  }
+                }
+              }}
+              onRedo={(opts) => {
+                const ed = getFocusedEditor();
+                if (ed) {
+                  const ok = ed.redo();
+                  if (ok) {
+                    setFindSummary(ed.updateSearchHighlights(opts));
+                    showToast("Redid replacement", "info");
+                  } else {
+                    showToast("Nothing to redo", "info");
                   }
                 }
               }}
@@ -2603,7 +2601,16 @@ export default function VaultWorkspace() {
                       onCursorChange={(stats) => {
                         if (focusedPane === "primary") setCursorStats(stats);
                       }}
-                      onFocusPane={() => setFocusedPane("primary")}
+                      onHistoryChange={(hist) => {
+                        if (focusedPane === "primary") setHistoryDepth(hist);
+                      }}
+                      onFocusPane={() => {
+                        setFocusedPane("primary");
+                        setHistoryDepth({
+                          canUndo: primaryEditorRef.current?.canUndo() ?? false,
+                          canRedo: primaryEditorRef.current?.canRedo() ?? false,
+                        });
+                      }}
                     />
                   </div>
                 ) : null}
@@ -2686,7 +2693,16 @@ export default function VaultWorkspace() {
                         onCursorChange={(stats) => {
                           if (focusedPane === "split") setCursorStats(stats);
                         }}
-                        onFocusPane={() => setFocusedPane("split")}
+                        onHistoryChange={(hist) => {
+                          if (focusedPane === "split") setHistoryDepth(hist);
+                        }}
+                        onFocusPane={() => {
+                          setFocusedPane("split");
+                          setHistoryDepth({
+                            canUndo: splitEditorRef.current?.canUndo() ?? false,
+                            canRedo: splitEditorRef.current?.canRedo() ?? false,
+                          });
+                        }}
                       />
                     </div>
                   </div>

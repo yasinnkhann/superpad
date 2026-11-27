@@ -38,7 +38,9 @@ import {
   historyKeymap,
   indentWithTab,
   redo,
+  redoDepth,
   undo,
+  undoDepth,
 } from "@codemirror/commands";
 import {
   HighlightStyle,
@@ -90,6 +92,8 @@ export interface CodeEditorHandle {
   focus: () => void;
   undo: () => boolean;
   redo: () => boolean;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
   jumpToRange: (start: number, end: number) => void;
   jumpToLine: (lineNumber: number) => void;
   insertAtCursor: (text: string) => void;
@@ -115,6 +119,7 @@ interface CodeEditorProps {
   onChange: (nextContent: string) => void;
   onBookmarksChange: (nextBookmarks: number[]) => void;
   onCursorChange?: (stats: CursorStats) => void;
+  onHistoryChange?: (stats: { canUndo: boolean; canRedo: boolean }) => void;
   onFocusPane?: () => void;
 }
 
@@ -463,6 +468,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
     onChange,
     onBookmarksChange,
     onCursorChange,
+    onHistoryChange,
     onFocusPane,
   },
   ref
@@ -485,12 +491,14 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
   const onChangeRef = useRef(onChange);
   const onBookmarksChangeRef = useRef(onBookmarksChange);
   const onCursorChangeRef = useRef(onCursorChange);
+  const onHistoryChangeRef = useRef(onHistoryChange);
   const onFocusPaneRef = useRef(onFocusPane);
   const activeSearchIndexRef = useRef<number>(-1);
 
   onChangeRef.current = onChange;
   onBookmarksChangeRef.current = onBookmarksChange;
   onCursorChangeRef.current = onCursorChange;
+  onHistoryChangeRef.current = onHistoryChange;
   onFocusPaneRef.current = onFocusPane;
 
   const createTabState = (
@@ -551,6 +559,10 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             onChangeRef.current(update.state.doc.toString());
+            onHistoryChangeRef.current?.({
+              canUndo: undoDepth(update.state) > 0,
+              canRedo: redoDepth(update.state) > 0,
+            });
             const updatedBookmarks = extractBookmarkLineNumbers(update.state);
             // Sync bookmark line shifts after inserting/deleting newlines
             const prevBookmarks = extractBookmarkLineNumbers(update.startState);
@@ -603,6 +615,10 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
     viewRef.current = view;
 
     const headLine = initialState.doc.lineAt(0);
+    onHistoryChangeRef.current?.({
+      canUndo: undoDepth(initialState) > 0,
+      canRedo: redoDepth(initialState) > 0,
+    });
     onCursorChangeRef.current?.({
       line: headLine.number,
       col: 1,
@@ -652,6 +668,10 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
       }
 
       view.setState(nextState);
+      onHistoryChangeRef.current?.({
+        canUndo: undoDepth(nextState) > 0,
+        canRedo: redoDepth(nextState) > 0,
+      });
       const sel = nextState.selection.main;
       const headLine = nextState.doc.lineAt(sel.head);
       onCursorChangeRef.current?.({
@@ -736,12 +756,32 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
       undo(): boolean {
         const view = viewRef.current;
         if (!view) return false;
-        return undo(view);
+        const res = undo(view);
+        onHistoryChangeRef.current?.({
+          canUndo: undoDepth(view.state) > 0,
+          canRedo: redoDepth(view.state) > 0,
+        });
+        return res;
       },
       redo(): boolean {
         const view = viewRef.current;
         if (!view) return false;
-        return redo(view);
+        const res = redo(view);
+        onHistoryChangeRef.current?.({
+          canUndo: undoDepth(view.state) > 0,
+          canRedo: redoDepth(view.state) > 0,
+        });
+        return res;
+      },
+      canUndo(): boolean {
+        const view = viewRef.current;
+        if (!view) return false;
+        return undoDepth(view.state) > 0;
+      },
+      canRedo(): boolean {
+        const view = viewRef.current;
+        if (!view) return false;
+        return redoDepth(view.state) > 0;
       },
       jumpToRange(start: number, end: number) {
         const view = viewRef.current;

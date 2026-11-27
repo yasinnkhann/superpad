@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Redo2,
   Regex,
   Replace,
   ReplaceAll,
@@ -19,11 +20,14 @@ interface FindReplaceBarProps {
   open: boolean;
   initialShowReplace?: boolean;
   summary: SearchMatchSummary;
+  canUndo?: boolean;
+  canRedo?: boolean;
   onOptionsChange: (opts: SearchOptions) => void;
   onStep: (opts: SearchOptions, dir: "next" | "prev") => void;
   onReplaceOne: (opts: SearchOptions) => void;
   onReplaceAll: (opts: SearchOptions) => void;
   onUndo?: (opts: SearchOptions) => void;
+  onRedo?: (opts: SearchOptions) => void;
   onClose: () => void;
 }
 
@@ -31,11 +35,14 @@ export default function FindReplaceBar({
   open,
   initialShowReplace = false,
   summary,
+  canUndo = false,
+  canRedo = false,
   onOptionsChange,
   onStep,
   onReplaceOne,
   onReplaceAll,
   onUndo,
+  onRedo,
   onClose,
 }: FindReplaceBarProps) {
   const [query, setQuery] = useState("");
@@ -251,11 +258,32 @@ export default function FindReplaceBar({
                 <button
                   type="button"
                   onClick={() => onUndo(currentOpts)}
-                  title="Undo last replace (⌘Z)"
-                  className="px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[11px] inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  disabled={!canUndo}
+                  title={canUndo ? "Undo last replace (⌘Z)" : "Nothing to undo"}
+                  className={`px-2 py-1 rounded text-[11px] inline-flex items-center gap-1 transition-all ${
+                    canUndo
+                      ? "bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 cursor-pointer shadow-sm shadow-amber-500/10"
+                      : "opacity-25 cursor-not-allowed text-[#6e7681] border border-transparent"
+                  }`}
                 >
                   <Undo2 className="w-3 h-3" />
                   <span>Undo</span>
+                </button>
+              ) : null}
+              {onRedo ? (
+                <button
+                  type="button"
+                  onClick={() => onRedo(currentOpts)}
+                  disabled={!canRedo}
+                  title={canRedo ? "Redo last undone replace (⌘⇧Z)" : "Nothing to redo"}
+                  className={`px-2 py-1 rounded text-[11px] inline-flex items-center gap-1 transition-all ${
+                    canRedo
+                      ? "bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 text-sky-300 cursor-pointer shadow-sm shadow-sky-500/10"
+                      : "opacity-25 cursor-not-allowed text-[#6e7681] border border-transparent"
+                  }`}
+                >
+                  <Redo2 className="w-3 h-3" />
+                  <span>Redo</span>
                 </button>
               ) : null}
             </div>
