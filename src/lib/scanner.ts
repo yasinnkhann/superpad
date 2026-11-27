@@ -1,4 +1,4 @@
-import { NoteTab, ScannerMatch, ScannerQuery } from "@/types/vault";
+import type { NoteRecord, ScannerMatch, ScannerQuery } from "@/types/vault";
 
 export function parseCriteriaList(raw: string, caseSensitive = false): string[] {
   if (!raw || !raw.trim()) return [];
@@ -37,7 +37,6 @@ export function extractParagraphBlocks(text: string): IndexedBlock[] {
     const startOffset = rawStart + leadingWs;
     const endOffset = startOffset + trimmed.length;
 
-    // Count newlines before startOffset to obtain 1-based line number
     let lineNumber = 1;
     for (let i = 0; i < startOffset; i++) {
       if (text.charCodeAt(i) === 10) lineNumber++;
@@ -68,14 +67,15 @@ export function extractParagraphBlocks(text: string): IndexedBlock[] {
 }
 
 /**
- * Runs the boolean paragraph scanner across one or multiple tabs:
+ * Runs the boolean paragraph scanner across current tab, open tabs, or ALL notes in the account:
  * - all: every comma-separated term MUST appear in the block (AND)
  * - any: at least one comma-separated term MUST appear in the block (OR)
  * - exclude: NONE of these comma-separated terms may appear in the block (NOT)
  */
 export function runBooleanScanner(
-  tabs: NoteTab[],
-  activeTabId: string,
+  allNotes: NoteRecord[],
+  openNoteIds: string[],
+  activeNoteId: string | null,
   query: ScannerQuery
 ): { matches: ScannerMatch[]; totalBlocks: number; highlightTerms: string[] } {
   const caseSensitive = Boolean(query.caseSensitive);
@@ -83,15 +83,20 @@ export function runBooleanScanner(
   const anyTerms = parseCriteriaList(query.any, caseSensitive);
   const excludeTerms = parseCriteriaList(query.exclude, caseSensitive);
 
-  const targetTabs =
-    query.scope === "all" ? tabs : tabs.filter((t) => t.id === activeTabId);
+  const openSet = new Set(openNoteIds);
+  const targetNotes =
+    query.scope === "all"
+      ? allNotes
+      : query.scope === "open"
+        ? allNotes.filter((n) => openSet.has(n.id))
+        : allNotes.filter((n) => n.id === activeNoteId);
 
   let totalBlocks = 0;
   const hasCriteria = allTerms.length > 0 || anyTerms.length > 0 || excludeTerms.length > 0;
   const matches: ScannerMatch[] = [];
 
-  for (const tab of targetTabs) {
-    const blocks = extractParagraphBlocks(tab.content);
+  for (const note of targetNotes) {
+    const blocks = extractParagraphBlocks(note.content);
     totalBlocks += blocks.length;
 
     if (!hasCriteria) continue;
@@ -110,8 +115,9 @@ export function runBooleanScanner(
       }
 
       matches.push({
-        tabId: tab.id,
-        tabTitle: tab.title,
+        noteId: note.id,
+        noteTitle: note.title,
+        noteFolder: note.folder,
         blockIndex,
         lineNumber: block.lineNumber,
         startOffset: block.startOffset,
@@ -165,7 +171,10 @@ export function trimTrailingWhitespace(text: string): string {
     .join("\n");
 }
 
-export function formatJsonText(text: string, minify = false): { ok: true; result: string } | { ok: false; error: string } {
+export function formatJsonText(
+  text: string,
+  minify = false
+): { ok: true; result: string } | { ok: false; error: string } {
   try {
     const parsed = JSON.parse(text);
     return {

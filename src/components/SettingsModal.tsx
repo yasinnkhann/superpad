@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   KeyRound,
   Lock,
+  LogOut,
   Palette,
   Settings,
   Trash2,
@@ -14,12 +15,13 @@ import type { EditorSettings, ThemeMode } from "@/types/vault";
 
 interface SettingsModalProps {
   open: boolean;
-  room: string;
+  username: string;
   settings: EditorSettings;
   onUpdateSettings: (next: EditorSettings) => void;
-  onChangePassword: (newPassword: string) => Promise<void>;
+  onChangePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   onLockNow: () => void;
-  onDeleteRoom: () => Promise<void>;
+  onSignOut: () => Promise<void>;
+  onDeleteAccount: (currentPassword: string) => Promise<void>;
   onClose: () => void;
 }
 
@@ -32,54 +34,69 @@ const THEME_OPTIONS: { id: ThemeMode; label: string; swatch: string }[] = [
 
 export default function SettingsModal({
   open,
-  room,
+  username,
   settings,
   onUpdateSettings,
   onChangePassword,
   onLockNow,
-  onDeleteRoom,
+  onSignOut,
+  onDeleteAccount,
   onClose,
 }: SettingsModalProps) {
+  const [currentPwd, setCurrentPwd] = useState("");
   const [newPwd, setNewPwd] = useState("");
   const [confirmPwd, setConfirmPwd] = useState("");
-  const [pwdMessage, setPwdMessage] = useState("");
+  const [pwdStatus, setPwdStatus] = useState<{ msg: string; err?: boolean } | null>(null);
   const [changingPwd, setChangingPwd] = useState(false);
 
-  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleteUserConfirm, setDeleteUserConfirm] = useState("");
+  const [deletePwdConfirm, setDeletePwdConfirm] = useState("");
+  const [deleteErr, setDeleteErr] = useState("");
   const [deleting, setDeleting] = useState(false);
 
   if (!open) return null;
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newPwd.length < 4) {
-      setPwdMessage("Password must be at least 4 characters.");
+    if (!currentPwd) {
+      setPwdStatus({ msg: "Enter your current password.", err: true });
+      return;
+    }
+    if (newPwd.length < 6) {
+      setPwdStatus({ msg: "New password must be at least 6 characters.", err: true });
       return;
     }
     if (newPwd !== confirmPwd) {
-      setPwdMessage("Passwords do not match.");
+      setPwdStatus({ msg: "New passwords do not match.", err: true });
       return;
     }
     setChangingPwd(true);
-    setPwdMessage("");
+    setPwdStatus(null);
     try {
-      await onChangePassword(newPwd);
+      await onChangePassword(currentPwd, newPwd);
+      setCurrentPwd("");
       setNewPwd("");
       setConfirmPwd("");
-      setPwdMessage("Vault re-encrypted and saved with new password!");
+      setPwdStatus({ msg: "All notes atomically re-encrypted under your new password!" });
     } catch (err) {
-      setPwdMessage(err instanceof Error ? err.message : "Failed to update password.");
+      setPwdStatus({
+        msg: err instanceof Error ? err.message : "Failed to update password.",
+        err: true,
+      });
     } finally {
       setChangingPwd(false);
     }
   };
 
-  const handleDelete = async () => {
-    if (deleteConfirm !== room) return;
+  const handleDelete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (deleteUserConfirm !== username || !deletePwdConfirm) return;
     setDeleting(true);
+    setDeleteErr("");
     try {
-      await onDeleteRoom();
-    } finally {
+      await onDeleteAccount(deletePwdConfirm);
+    } catch (err) {
+      setDeleteErr(err instanceof Error ? err.message : "Account deletion failed.");
       setDeleting(false);
     }
   };
@@ -97,7 +114,9 @@ export default function SettingsModal({
         <div className="px-5 py-3.5 border-b border-[#262e3a] bg-[#161b22] flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Settings className="w-4 h-4 text-emerald-400" />
-            <h2 className="text-sm font-semibold text-white">Workspace Settings &amp; Security</h2>
+            <h2 className="text-sm font-semibold text-white">
+              Settings &amp; Security — <span className="font-mono text-emerald-400">@{username}</span>
+            </h2>
           </div>
           <button
             type="button"
@@ -193,9 +212,9 @@ export default function SettingsModal({
 
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-xs text-[#c9d1d9]">Auto-Save (3s idle debounce)</div>
+                <div className="text-xs text-[#c9d1d9]">Auto-Save to Cloud (3s idle debounce)</div>
                 <div className="text-[11px] text-[#6e7681]">
-                  Automatically encrypt &amp; sync after you pause typing
+                  Local encrypted crash-recovery drafts are always active automatically
                 </div>
               </div>
               <input
@@ -215,12 +234,12 @@ export default function SettingsModal({
           <section className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-[#8b949e] flex items-center gap-1.5">
               <KeyRound className="w-3.5 h-3.5" />
-              Session &amp; Password
+              Encryption Key &amp; Session
             </h3>
 
             <div>
               <label className="block text-xs text-[#c9d1d9] mb-1.5">
-                Remember Password in This Browser
+                Keep Vault Unlocked on Reload For
               </label>
               <div className="grid grid-cols-4 gap-1.5">
                 {[
@@ -248,13 +267,22 @@ export default function SettingsModal({
             </div>
 
             <form onSubmit={handlePasswordSubmit} className="space-y-2 pt-1">
-              <label className="block text-xs text-[#c9d1d9]">Change Vault Password</label>
+              <label className="block text-xs text-[#c9d1d9]">
+                Change Master Password (re-encrypts all notes)
+              </label>
+              <input
+                type="password"
+                value={currentPwd}
+                onChange={(e) => setCurrentPwd(e.target.value)}
+                placeholder="Current master password"
+                className="w-full px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#2b323d] focus:border-emerald-500 text-xs text-white outline-none"
+              />
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <input
                   type="password"
                   value={newPwd}
                   onChange={(e) => setNewPwd(e.target.value)}
-                  placeholder="New password"
+                  placeholder="New master password"
                   className="px-3 py-1.5 rounded-lg bg-[#0d1117] border border-[#2b323d] focus:border-emerald-500 text-xs text-white outline-none"
                 />
                 <input
@@ -266,34 +294,46 @@ export default function SettingsModal({
                 />
               </div>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-emerald-400">{pwdMessage}</span>
+                <span
+                  className={`text-[11px] ${
+                    pwdStatus?.err ? "text-rose-400" : "text-emerald-400"
+                  }`}
+                >
+                  {pwdStatus?.msg}
+                </span>
                 <button
                   type="submit"
-                  disabled={changingPwd || !newPwd}
-                  className="px-3 py-1.5 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-xs font-medium text-white disabled:opacity-40 cursor-pointer"
+                  disabled={changingPwd || !newPwd || !currentPwd}
+                  className="px-3 py-1.5 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-xs font-medium text-white disabled:opacity-40 cursor-pointer shrink-0"
                 >
                   {changingPwd ? "Re-encrypting..." : "Update Password"}
                 </button>
               </div>
             </form>
 
-            <div className="pt-1 flex items-center justify-between p-3 rounded-lg bg-[#0d1117] border border-[#21262d]">
-              <div>
-                <div className="text-xs font-medium text-white">Lock Session Immediately</div>
-                <div className="text-[11px] text-[#6e7681]">
-                  Wipes decrypted notes from memory &amp; clears saved browser session
-                </div>
-              </div>
+            <div className="grid grid-cols-2 gap-2 pt-1">
               <button
                 type="button"
                 onClick={() => {
                   onClose();
                   onLockNow();
                 }}
-                className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                className="p-2.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Lock className="w-3.5 h-3.5" />
-                <span>Lock Now</span>
+                <span>Lock Vault Now</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  void onSignOut();
+                }}
+                className="p-2.5 rounded-lg bg-[#1b222c] hover:bg-[#262f3f] text-[#e6edf3] border border-[#30363d] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Sign Out</span>
               </button>
             </div>
           </section>
@@ -304,29 +344,40 @@ export default function SettingsModal({
           <section className="space-y-2.5 p-3.5 rounded-lg bg-rose-950/20 border border-rose-500/30">
             <h3 className="text-xs font-semibold text-rose-400 flex items-center gap-1.5">
               <AlertTriangle className="w-3.5 h-3.5" />
-              Danger Zone — Delete Vault
+              Danger Zone — Delete Account
             </h3>
             <p className="text-[11px] text-[#8b949e]">
-              Permanently deletes <code className="text-rose-300">/{room}</code> and all 10 rolling backups from cloud storage. Type <code className="text-white">{room}</code> to confirm.
+              Permanently deletes <code className="text-rose-300">@{username}</code>, all notes, and all revision snapshots. Type <code className="text-white">{username}</code> and your master password to confirm.
             </p>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={deleteConfirm}
-                onChange={(e) => setDeleteConfirm(e.target.value)}
-                placeholder={room}
-                className="flex-1 px-2.5 py-1.5 rounded bg-[#0d1117] border border-rose-500/40 text-xs font-mono text-white outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleDelete}
-                disabled={deleteConfirm !== room || deleting}
-                className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-xs font-medium text-white disabled:opacity-30 inline-flex items-center gap-1 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>{deleting ? "Deleting..." : "Delete"}</span>
-              </button>
-            </div>
+            <form onSubmit={handleDelete} className="space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={deleteUserConfirm}
+                  onChange={(e) => setDeleteUserConfirm(e.target.value)}
+                  placeholder={username}
+                  className="px-2.5 py-1.5 rounded bg-[#0d1117] border border-rose-500/40 text-xs font-mono text-white outline-none"
+                />
+                <input
+                  type="password"
+                  value={deletePwdConfirm}
+                  onChange={(e) => setDeletePwdConfirm(e.target.value)}
+                  placeholder="Master password"
+                  className="px-2.5 py-1.5 rounded bg-[#0d1117] border border-rose-500/40 text-xs text-white outline-none"
+                />
+              </div>
+              {deleteErr ? <p className="text-[11px] text-rose-400">{deleteErr}</p> : null}
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={deleteUserConfirm !== username || !deletePwdConfirm || deleting}
+                  className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-xs font-medium text-white disabled:opacity-30 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{deleting ? "Deleting..." : "Delete Account Permanently"}</span>
+                </button>
+              </div>
+            </form>
           </section>
         </div>
       </div>

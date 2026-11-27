@@ -13,51 +13,75 @@ export type LanguageMode =
 
 export type ThemeMode = "midnight" | "onedark" | "monokai" | "nord";
 
-export interface NoteTab {
+export interface AuthUser {
   id: string;
+  username: string;
+  kdfSalt: string;
+  createdAt: number;
+}
+
+export interface NoteMetadata {
   title: string;
-  content: string;
+  folder: string; // "" for root, or folder name like "Work", "Personal"
   language: LanguageMode;
   wordWrap: boolean;
   bookmarks: number[]; // 1-based line numbers
+  pinned: boolean;
+}
+
+export interface NoteRecord extends NoteMetadata {
+  id: string;
+  content: string;
+  version: number;
+  sizeBytes: number;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface VaultData {
-  version: 1;
-  activeTabId: string;
-  splitTabId: string | null;
-  tabs: NoteTab[];
+export interface EncryptedNoteDTO {
+  id: string;
+  encryptedMeta: string;
+  encryptedContent: string;
+  version: number;
+  sizeBytes: number;
+  createdAt: number;
   updatedAt: number;
+}
+
+export interface NoteRevisionSummary {
+  id: string;
+  noteId: string;
+  version: number;
+  sizeBytes: number;
+  createdAt: number;
+}
+
+export interface EncryptedRevisionDTO extends NoteRevisionSummary {
+  encryptedMeta: string;
+  encryptedContent: string;
 }
 
 export interface EditorSettings {
   theme: ThemeMode;
   fontSize: number;
-  sessionTtlMinutes: number; // 0 = never remember, 15, 60, 1440
+  sessionTtlMinutes: number; // 0 = never remember key across reloads, 15, 60, 1440
   autoSave: boolean;
   showLineNumbers: boolean;
   tabSize: number;
-}
-
-export interface RevisionSummary {
-  id: string;
-  timestamp: number;
-  size: number;
 }
 
 export interface ScannerQuery {
   all: string;
   any: string;
   exclude: string;
-  scope: "current" | "all";
+  scope: "current" | "open" | "all";
   caseSensitive?: boolean;
 }
 
 export interface ScannerMatch {
-  tabId: string;
-  tabTitle: string;
+  noteId: string;
+  noteTitle: string;
+  noteFolder: string;
   blockIndex: number;
   lineNumber: number;
   startOffset: number;
@@ -102,11 +126,11 @@ export const DEFAULT_SETTINGS: EditorSettings = {
   tabSize: 2,
 };
 
-export function generateTabId(): string {
+export function generateNoteId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID().slice(0, 8);
+    return crypto.randomUUID();
   }
-  return Math.random().toString(36).slice(2, 10);
+  return `note-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function detectLanguageFromFilename(filename: string): LanguageMode {
@@ -145,83 +169,43 @@ export function detectLanguageFromFilename(filename: string): LanguageMode {
   }
 }
 
-export function createNewTab(
-  title = "untitled.txt",
-  content = "",
-  language?: LanguageMode
-): NoteTab {
-  const now = Date.now();
-  return {
-    id: generateTabId(),
-    title,
-    content,
-    language: language ?? detectLanguageFromFilename(title),
-    wordWrap: true,
-    bookmarks: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-export function createDefaultVault(initialTitle = "notes.txt", initialContent = ""): VaultData {
-  const tab = createNewTab(initialTitle, initialContent);
-  return {
-    version: 1,
-    activeTabId: tab.id,
-    splitTabId: null,
-    tabs: [tab],
-    updatedAt: Date.now(),
-  };
-}
-
-export function normalizeVaultData(input: unknown): VaultData {
-  if (typeof input === "string") {
-    return createDefaultVault("notes.txt", input);
-  }
+export function normalizeNoteMetadata(input: unknown, fallbackTitle = "untitled.txt"): NoteMetadata {
   if (!input || typeof input !== "object") {
-    return createDefaultVault();
+    return {
+      title: fallbackTitle,
+      folder: "",
+      language: detectLanguageFromFilename(fallbackTitle),
+      wordWrap: true,
+      bookmarks: [],
+      pinned: false,
+    };
   }
-  const obj = input as Partial<VaultData>;
-  const rawTabs: unknown[] = Array.isArray(obj.tabs) ? obj.tabs : [];
-  const tabs: NoteTab[] = rawTabs
-    .filter((t): t is Partial<NoteTab> => !!t && typeof t === "object")
-    .map((t, i) => ({
-      id: typeof t.id === "string" && t.id ? t.id : generateTabId(),
-      title: typeof t.title === "string" && t.title.trim() ? t.title : `note-${i + 1}.txt`,
-      content: typeof t.content === "string" ? t.content : "",
-      language:
-        typeof t.language === "string" && t.language in LANGUAGE_LABELS
-          ? (t.language as LanguageMode)
-          : "plain",
-      wordWrap: typeof t.wordWrap === "boolean" ? t.wordWrap : true,
-      bookmarks: Array.isArray(t.bookmarks)
-        ? t.bookmarks.filter((n): n is number => typeof n === "number" && n > 0)
-        : [],
-      createdAt: typeof t.createdAt === "number" ? t.createdAt : Date.now(),
-      updatedAt: typeof t.updatedAt === "number" ? t.updatedAt : Date.now(),
-    }));
+  const obj = input as Partial<NoteMetadata>;
+  const title =
+    typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : fallbackTitle;
+  const folder = typeof obj.folder === "string" ? obj.folder.trim().replace(/^\/+|\/+$/g, "") : "";
+  const language: LanguageMode =
+    typeof obj.language === "string" && obj.language in LANGUAGE_LABELS
+      ? (obj.language as LanguageMode)
+      : detectLanguageFromFilename(title);
+  const wordWrap = typeof obj.wordWrap === "boolean" ? obj.wordWrap : true;
+  const bookmarks = Array.isArray(obj.bookmarks)
+    ? Array.from(
+        new Set(obj.bookmarks.filter((n): n is number => typeof n === "number" && n >= 1))
+      ).sort((a, b) => a - b)
+    : [];
+  const pinned = Boolean(obj.pinned);
 
-  if (tabs.length === 0) {
-    return createDefaultVault();
-  }
+  return { title, folder, language, wordWrap, bookmarks, pinned };
+}
 
-  const activeTabId =
-    typeof obj.activeTabId === "string" && tabs.some((t) => t.id === obj.activeTabId)
-      ? obj.activeTabId
-      : tabs[0].id;
-
-  const splitTabId =
-    typeof obj.splitTabId === "string" &&
-    obj.splitTabId !== activeTabId &&
-    tabs.some((t) => t.id === obj.splitTabId)
-      ? obj.splitTabId
-      : null;
-
+export function extractNoteMetadata(note: NoteRecord): NoteMetadata {
   return {
-    version: 1,
-    activeTabId,
-    splitTabId,
-    tabs,
-    updatedAt: typeof obj.updatedAt === "number" ? obj.updatedAt : Date.now(),
+    title: note.title,
+    folder: note.folder,
+    language: note.language,
+    wordWrap: note.wordWrap,
+    bookmarks: note.bookmarks,
+    pinned: note.pinned,
   };
 }

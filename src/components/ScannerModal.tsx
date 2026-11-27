@@ -11,15 +11,16 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { NoteTab, ScannerMatch } from "@/types/vault";
+import type { NoteRecord, ScannerMatch } from "@/types/vault";
 import { runBooleanScanner } from "@/lib/scanner";
 
 interface ScannerModalProps {
   open: boolean;
-  tabs: NoteTab[];
-  activeTabId: string;
+  allNotes: NoteRecord[];
+  openNoteIds: string[];
+  activeNoteId: string | null;
   onJumpToMatch: (match: ScannerMatch) => void;
-  onExportMatchesToTab: (title: string, content: string) => void;
+  onExportMatchesToNote: (title: string, content: string) => void;
   onClose: () => void;
 }
 
@@ -54,7 +55,6 @@ function renderHighlightedText(text: string, terms: string[], caseSensitive: boo
     );
   };
 
-  // Split URLs cleanly so URLs remain clickable hyperlinks while preserving highlights
   const urlParts = text.split(URL_SPLIT_REGEX);
   return urlParts.map((chunk, idx) => {
     if (idx % 2 === 1) {
@@ -76,16 +76,17 @@ function renderHighlightedText(text: string, terms: string[], caseSensitive: boo
 
 export default function ScannerModal({
   open,
-  tabs,
-  activeTabId,
+  allNotes,
+  openNoteIds,
+  activeNoteId,
   onJumpToMatch,
-  onExportMatchesToTab,
+  onExportMatchesToNote,
   onClose,
 }: ScannerModalProps) {
   const [allInput, setAllInput] = useState("");
   const [anyInput, setAnyInput] = useState("");
   const [excludeInput, setExcludeInput] = useState("");
-  const [scope, setScope] = useState<"current" | "all">("current");
+  const [scope, setScope] = useState<"current" | "open" | "all">("current");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const allInputRef = useRef<HTMLInputElement | null>(null);
@@ -104,14 +105,24 @@ export default function ScannerModal({
     if (!open) {
       return { matches: [], totalBlocks: 0, highlightTerms: [] };
     }
-    return runBooleanScanner(tabs, activeTabId, {
+    return runBooleanScanner(allNotes, openNoteIds, activeNoteId, {
       all: deferredAll,
       any: deferredAny,
       exclude: deferredExclude,
       scope,
       caseSensitive,
     });
-  }, [open, tabs, activeTabId, deferredAll, deferredAny, deferredExclude, scope, caseSensitive]);
+  }, [
+    open,
+    allNotes,
+    openNoteIds,
+    activeNoteId,
+    deferredAll,
+    deferredAny,
+    deferredExclude,
+    scope,
+    caseSensitive,
+  ]);
 
   if (!open) return null;
 
@@ -132,7 +143,7 @@ export default function ScannerModal({
     const summaryLabel = [allInput.trim(), anyInput.trim()].filter(Boolean).join(" ") || "scan";
     const tabTitle = `scan-${summaryLabel.slice(0, 18).replace(/[^a-zA-Z0-9_-]+/g, "-")}.txt`;
     const body = matches.map((m) => m.content).join("\n\n");
-    onExportMatchesToTab(tabTitle, body);
+    onExportMatchesToNote(tabTitle, body);
     onClose();
   };
 
@@ -149,39 +160,47 @@ export default function ScannerModal({
         }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#262e3a] bg-[#161b22]">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3.5 border-b border-[#262e3a] bg-[#161b22]">
           <div className="flex items-center gap-2.5">
             <Search className="w-4 h-4 text-amber-400" />
             <h2 className="text-sm font-semibold text-white">Boolean Block Scanner</h2>
-            <span className="hidden sm:inline text-[11px] font-mono text-[#6e7681]">
-              Matches paragraph blocks separated by blank lines
-            </span>
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Scope Toggle */}
+            {/* Scope Toggle: Current / Open Tabs / All Account Notes */}
             <div className="flex items-center p-0.5 rounded-lg bg-[#0d1117] border border-[#2b323d] text-xs">
               <button
                 type="button"
                 onClick={() => setScope("current")}
-                className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
                   scope === "current"
                     ? "bg-[#21262d] text-white font-medium"
                     : "text-[#8b949e] hover:text-white"
                 }`}
               >
-                Current Tab
+                Current
+              </button>
+              <button
+                type="button"
+                onClick={() => setScope("open")}
+                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                  scope === "open"
+                    ? "bg-[#21262d] text-white font-medium"
+                    : "text-[#8b949e] hover:text-white"
+                }`}
+              >
+                Open ({openNoteIds.length})
               </button>
               <button
                 type="button"
                 onClick={() => setScope("all")}
-                className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
                   scope === "all"
                     ? "bg-[#21262d] text-white font-medium"
                     : "text-[#8b949e] hover:text-white"
                 }`}
               >
-                All Tabs ({tabs.length})
+                All Notes ({allNotes.length})
               </button>
             </div>
 
@@ -257,9 +276,8 @@ export default function ScannerModal({
             </div>
           </div>
 
-          {/* Toolbar */}
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-            <div className="flex items-center gap-3 text-xs text-[#8b949e]">
+            <div className="text-xs text-[#8b949e]">
               {hasCriteria ? (
                 <span>
                   Found{" "}
@@ -295,7 +313,7 @@ export default function ScannerModal({
                   className="px-2.5 py-1 rounded-md text-xs inline-flex items-center gap-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 cursor-pointer transition-colors"
                 >
                   <FilePlus2 className="w-3.5 h-3.5" />
-                  <span>Open Results in New Tab</span>
+                  <span>Save Matches to New Note</span>
                 </button>
               ) : null}
 
@@ -327,17 +345,16 @@ export default function ScannerModal({
                 Enter comma-separated keywords in AND, OR, or NOT above.
               </p>
               <p className="text-xs max-w-md">
-                Each blank-line-separated paragraph block is scanned instantaneously. Matching URLs become clickable links.
+                Switch scope to All Notes to search across every encrypted note in your account instantly.
               </p>
             </div>
           ) : matches.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center text-[#6e7681] py-12">
               <p className="text-sm text-[#8b949e]">No matching entries found.</p>
-              <p className="text-xs mt-1">Try loosening your AND / NOT criteria or switching to All Tabs.</p>
             </div>
           ) : (
             matches.slice(0, 250).map((match, idx) => {
-              const cardKey = `${match.tabId}-${match.startOffset}`;
+              const cardKey = `${match.noteId}-${match.startOffset}`;
               const isCopied = copiedKey === cardKey;
               return (
                 <div
@@ -352,7 +369,8 @@ export default function ScannerModal({
                     <div className="flex items-center gap-2 text-[11px] font-mono text-[#8b949e]">
                       <span className="text-[#6e7681]">#{idx + 1}</span>
                       <span className="px-1.5 py-0.5 rounded bg-[#1b222c] text-[#c9d1d9]">
-                        {match.tabTitle}
+                        {match.noteFolder ? `${match.noteFolder} / ` : ""}
+                        {match.noteTitle}
                       </span>
                       <span>Ln {match.lineNumber}</span>
                     </div>
@@ -395,7 +413,7 @@ export default function ScannerModal({
           )}
           {matches.length > 250 ? (
             <p className="text-center text-xs text-[#6e7681] py-2">
-              Showing first 250 of {matches.length.toLocaleString()} matches. Narrow your query or export all results to a new tab.
+              Showing first 250 of {matches.length.toLocaleString()} matches. Narrow your query or save all matches to a new note.
             </p>
           ) : null}
         </div>

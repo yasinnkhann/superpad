@@ -1,14 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  AlertTriangle,
   Bookmark,
   Calendar,
-  Check,
   Columns2,
-  Copy,
   Download,
   FileCode2,
   FilePlus,
@@ -17,7 +15,10 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  LogOut,
+  PanelLeft,
   Plus,
+  RefreshCw,
   Save,
   Search,
   Settings,
@@ -29,29 +30,42 @@ import {
   X,
 } from "lucide-react";
 import {
+  AuthUser,
   DEFAULT_SETTINGS,
   EditorSettings,
+  EncryptedNoteDTO,
   LANGUAGE_EXTENSIONS,
   LANGUAGE_LABELS,
   LanguageMode,
-  NoteTab,
+  NoteMetadata,
+  NoteRecord,
   ScannerMatch,
-  VaultData,
-  createDefaultVault,
-  createNewTab,
   detectLanguageFromFilename,
-  generateTabId,
+  extractNoteMetadata,
+  generateNoteId,
 } from "@/types/vault";
 import {
-  clearRoomPassword,
-  decryptVault,
-  encryptVault,
-  getSavedRoomPassword,
+  clearCachedUserKey,
+  decryptNoteDTO,
+  deriveUserKeys,
+  encryptNotePayload,
+  generateSaltBase64,
+  getCachedUserKey,
   getStoredSettings,
-  recordRecentRoom,
-  saveRoomPassword,
+  saveCachedUserKey,
   saveStoredSettings,
 } from "@/lib/crypto";
+import {
+  clearInMemoryKey,
+  getInMemoryKey,
+  setInMemoryKey,
+} from "@/lib/memoryKey";
+import {
+  clearUserDrafts,
+  deleteEncryptedDraft,
+  loadEncryptedDrafts,
+  saveEncryptedDraft,
+} from "@/lib/drafts";
 import {
   computeTextStats,
   createDateStamp,
@@ -68,60 +82,59 @@ import CodeEditor, {
   SearchMatchSummary,
   SearchOptions,
 } from "@/components/CodeEditor";
+import FileSidebar from "@/components/FileSidebar";
 import FindReplaceBar from "@/components/FindReplaceBar";
 import ScannerModal from "@/components/ScannerModal";
 import HistoryDrawer from "@/components/HistoryDrawer";
 import SettingsModal from "@/components/SettingsModal";
 
-type AuthPhase = "checking" | "create" | "unlock" | "ready";
+type WorkspacePhase = "checking" | "locked" | "ready";
 
-function serializeVaultForDiff(vault: VaultData | null): string {
-  if (!vault) return "";
-  return JSON.stringify(
-    vault.tabs.map((t) => ({
-      id: t.id,
-      title: t.title,
-      content: t.content,
-      language: t.language,
-      wordWrap: t.wordWrap,
-      bookmarks: t.bookmarks,
-    }))
-  );
+interface ConflictState {
+  noteId: string;
+  localVersion: number;
+  remoteNote: NoteRecord;
 }
 
-function serializeTabForDiff(tab: NoteTab | undefined): string {
-  if (!tab) return "";
+function serializeNoteForDiff(note: NoteRecord | undefined): string {
+  if (!note) return "";
   return JSON.stringify({
-    title: tab.title,
-    content: tab.content,
-    language: tab.language,
-    wordWrap: tab.wordWrap,
-    bookmarks: tab.bookmarks,
+    title: note.title,
+    folder: note.folder,
+    content: note.content,
+    language: note.language,
+    wordWrap: note.wordWrap,
+    bookmarks: note.bookmarks,
+    pinned: note.pinned,
   });
 }
 
-export default function VaultWorkspace({ room }: { room: string }) {
+export default function VaultWorkspace() {
   const router = useRouter();
-  const normalizedRoom = room.trim().toLowerCase();
 
-  // Auth & Vault Lifecycle
-  const [phase, setPhase] = useState<AuthPhase>("checking");
-  const [serverCiphertext, setServerCiphertext] = useState("");
-  const [storageBackend, setStorageBackend] = useState<string>("");
-  const [activePassword, setActivePassword] = useState("");
-  const [passwordInput, setPasswordInput] = useState("");
-  const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
-  const [authError, setAuthError] = useState("");
-  const [authWorking, setAuthWorking] = useState(false);
+  // Auth & Encryption State
+  const [phase, setPhase] = useState<WorkspacePhase>("checking");
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [dbBackend, setDbBackend] = useState<string>("");
+  const [encryptionKey, setEncryptionKey] = useState<CryptoKey | null>(null);
+  const [serializedKey, setSerializedKey] = useState<string>("");
+  const [unlockPwd, setUnlockPwd] = useState("");
+  const [unlockError, setUnlockError] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
 
-  // Vault State
-  const [vault, setVault] = useState<VaultData | null>(null);
-  const [savedVaultSnapshot, setSavedVaultSnapshot] = useState<VaultData | null>(null);
-  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
-  const [saving, setSaving] = useState(false);
+  // Notes & Tabs State
+  const [notes, setNotes] = useState<NoteRecord[]>([]);
+  const [savedSnapshots, setSavedSnapshots] = useState<Map<string, string>>(new Map());
+  const [openTabIds, setOpenTabIds] = useState<string[]>([]);
+  const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
+  const [splitNoteId, setSplitNoteId] = useState<string | null>(null);
+  const [extraFolders, setExtraFolders] = useState<string[]>([]);
+  const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
+  const [conflict, setConflict] = useState<ConflictState | null>(null);
 
-  // Editor Settings & UI State
+  // Editor & UI State
   const [settings, setSettings] = useState<EditorSettings>(DEFAULT_SETTINGS);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [focusedPane, setFocusedPane] = useState<"primary" | "split">("primary");
   const [cursorStats, setCursorStats] = useState<CursorStats>({
     line: 1,
@@ -151,25 +164,24 @@ export default function VaultWorkspace({ room }: { room: string }) {
   const [toast, setToast] = useState<{ msg: string; type?: "info" | "success" | "error" } | null>(
     null
   );
-  const [copiedUrl, setCopiedUrl] = useState(false);
 
   // Refs
   const primaryEditorRef = useRef<CodeEditorHandle | null>(null);
   const splitEditorRef = useRef<CodeEditorHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   const showToast = useCallback(
     (msg: string, type: "info" | "success" | "error" = "info") => {
       setToast({ msg, type });
       setTimeout(() => {
         setToast((cur) => (cur?.msg === msg ? null : cur));
-      }, 2800);
+      }, 3000);
     },
     []
   );
 
-  // Load saved UI settings once on mount
   useEffect(() => {
     setSettings(getStoredSettings(DEFAULT_SETTINGS));
   }, []);
@@ -178,372 +190,534 @@ export default function VaultWorkspace({ room }: { room: string }) {
     (next: EditorSettings) => {
       setSettings(next);
       saveStoredSettings(next);
-      if (activePassword) {
-        saveRoomPassword(normalizedRoom, activePassword, next.sessionTtlMinutes);
+      if (user && serializedKey) {
+        saveCachedUserKey(user.id, serializedKey, next.sessionTtlMinutes);
       }
     },
-    [activePassword, normalizedRoom]
+    [user, serializedKey]
   );
 
-  // Compute exact undo-aware dirty status (for whole vault & per tab!)
-  const isVaultDirty = useMemo(() => {
-    if (!vault || !savedVaultSnapshot) return false;
-    return serializeVaultForDiff(vault) !== serializeVaultForDiff(savedVaultSnapshot);
-  }, [vault, savedVaultSnapshot]);
-
-  const savedTabMap = useMemo(() => {
-    const map = new Map<string, string>();
-    if (!savedVaultSnapshot) return map;
-    for (const t of savedVaultSnapshot.tabs) {
-      map.set(t.id, serializeTabForDiff(t));
+  // Derived Dirty Set (true undo-aware diff per note!)
+  const dirtyNoteIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of notes) {
+      const saved = savedSnapshots.get(n.id);
+      if (!saved || saved !== serializeNoteForDiff(n)) {
+        set.add(n.id);
+      }
     }
+    return set;
+  }, [notes, savedSnapshots]);
+
+  const notesById = useMemo(() => {
+    const map = new Map<string, NoteRecord>();
+    for (const n of notes) map.set(n.id, n);
     return map;
-  }, [savedVaultSnapshot]);
+  }, [notes]);
 
-  const isTabDirty = useCallback(
-    (tab: NoteTab) => {
-      const saved = savedTabMap.get(tab.id);
-      if (!saved) return true;
-      return saved !== serializeTabForDiff(tab);
-    },
-    [savedTabMap]
-  );
-
-  const activeTab = useMemo(() => {
-    if (!vault) return null;
-    return vault.tabs.find((t) => t.id === vault.activeTabId) ?? vault.tabs[0] ?? null;
-  }, [vault]);
-
-  const splitTab = useMemo(() => {
-    if (!vault || !vault.splitTabId) return null;
-    return vault.tabs.find((t) => t.id === vault.splitTabId) ?? null;
-  }, [vault]);
-
-  const focusedTab = focusedPane === "split" && splitTab ? splitTab : activeTab;
+  const activeNote = activeNoteId ? notesById.get(activeNoteId) ?? null : null;
+  const splitNote = splitNoteId ? notesById.get(splitNoteId) ?? null : null;
+  const focusedNote = focusedPane === "split" && splitNote ? splitNote : activeNote;
   const getFocusedEditor = () =>
-    focusedPane === "split" && splitTab ? splitEditorRef.current : primaryEditorRef.current;
+    focusedPane === "split" && splitNote ? splitEditorRef.current : primaryEditorRef.current;
 
   const activeStats = useMemo(
-    () => computeTextStats(focusedTab?.content ?? ""),
-    [focusedTab?.content]
+    () => computeTextStats(focusedNote?.content ?? ""),
+    [focusedNote?.content]
   );
 
-  // Initial fetch + zero-flicker auto-unlock
+  const totalAccountBytes = useMemo(
+    () => notes.reduce((sum, n) => sum + n.sizeBytes, 0),
+    [notes]
+  );
+
+  // Load & decrypt all notes for an authenticated user + recover encrypted IndexedDB drafts
+  const loadAccountNotes = useCallback(
+    async (authUser: AuthUser, key: CryptoKey) => {
+      const res = await fetch("/api/notes", { cache: "no-store" });
+      if (res.status === 401) {
+        router.replace("/");
+        return;
+      }
+      const data = (await res.json()) as { notes: EncryptedNoteDTO[]; backend?: string };
+      if (data.backend) setDbBackend(data.backend);
+
+      const decrypted = await Promise.all(
+        (data.notes || []).map((dto) => decryptNoteDTO(dto, key))
+      );
+
+      // Build clean saved snapshots map
+      const snapMap = new Map<string, string>();
+      for (const n of decrypted) {
+        snapMap.set(n.id, serializeNoteForDiff(n));
+      }
+
+      // Check IndexedDB for any encrypted unsaved crash-recovery drafts
+      const drafts = await loadEncryptedDrafts(authUser.id, key);
+      let recoveredCount = 0;
+      const mergedNotes = decrypted.map((note) => {
+        const draft = drafts.find((d) => d.noteId === note.id);
+        if (draft && draft.updatedAt > note.updatedAt) {
+          recoveredCount++;
+          return {
+            ...note,
+            ...draft.meta,
+            content: draft.content,
+            sizeBytes: new TextEncoder().encode(draft.content).length,
+          };
+        }
+        return note;
+      });
+
+      setNotes(mergedNotes);
+      setSavedSnapshots(snapMap);
+
+      if (mergedNotes.length > 0) {
+        const first = mergedNotes[0];
+        setOpenTabIds([first.id]);
+        setActiveNoteId(first.id);
+      } else {
+        setOpenTabIds([]);
+        setActiveNoteId(null);
+      }
+      setPhase("ready");
+
+      if (recoveredCount > 0) {
+        showToast(
+          `Recovered ${recoveredCount} unsaved local draft(s) from crash recovery`,
+          "info"
+        );
+      }
+    },
+    [router, showToast]
+  );
+
+  // Bootstrap: check HttpOnly session -> check in-memory / cached key -> zero-flicker unlock!
   useEffect(() => {
     let cancelled = false;
 
-    async function bootstrapRoom() {
+    async function boot() {
       setPhase("checking");
-      setAuthError("");
-
       try {
-        const res = await fetch(`/api/vault/${encodeURIComponent(normalizedRoom)}`, {
-          cache: "no-store",
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || "Invalid room name");
-        }
+        const res = await fetch("/api/auth/me", { cache: "no-store" });
+        const data = (await res.json()) as {
+          authenticated: boolean;
+          user: AuthUser | null;
+          backend?: string;
+        };
         if (cancelled) return;
-
-        setStorageBackend(data.storage || "");
-        if (data.updatedAt) setLastSavedAt(data.updatedAt);
-
-        if (!data.exists || !data.ciphertext) {
-          setServerCiphertext("");
-          setPhase("create");
+        if (!data.authenticated || !data.user) {
+          router.replace("/");
           return;
         }
 
-        setServerCiphertext(data.ciphertext);
+        setUser(data.user);
+        if (data.backend) setDbBackend(data.backend);
 
-        // Check URL hash (#password) or remembered browser session
-        const hashPwd = window.location.hash.length > 1
-          ? decodeURIComponent(window.location.hash.slice(1))
-          : "";
-        const cachedPwd = getSavedRoomPassword(normalizedRoom);
-        const autoPwd = hashPwd || cachedPwd;
+        // Try in-memory key first (SPA transition from `/`), then localStorage TTL cache
+        const mem = getInMemoryKey(data.user.id);
+        const cached = mem ?? (await getCachedUserKey(data.user.id));
 
-        if (autoPwd) {
-          try {
-            const decrypted = await decryptVault(data.ciphertext, autoPwd);
-            if (cancelled) return;
-            const currentSettings = getStoredSettings(DEFAULT_SETTINGS);
-            setActivePassword(autoPwd);
-            setVault(decrypted);
-            setSavedVaultSnapshot(structuredClone(decrypted));
-            saveRoomPassword(normalizedRoom, autoPwd, currentSettings.sessionTtlMinutes);
-            recordRecentRoom(normalizedRoom);
-            setPhase("ready");
-            return;
-          } catch {
-            clearRoomPassword(normalizedRoom);
-          }
+        if (cached && !cancelled) {
+          setEncryptionKey(cached.key);
+          setSerializedKey(cached.serializedKey);
+          setInMemoryKey(data.user.id, cached.key, cached.serializedKey);
+          await loadAccountNotes(data.user, cached.key);
+          return;
         }
 
-        setPhase("unlock");
-      } catch (err) {
-        if (!cancelled) {
-          setAuthError(err instanceof Error ? err.message : "Failed to load vault");
-          setPhase("unlock");
-        }
+        if (!cancelled) setPhase("locked");
+      } catch {
+        if (!cancelled) router.replace("/");
       }
     }
 
-    bootstrapRoom();
+    boot();
     return () => {
       cancelled = true;
     };
-  }, [normalizedRoom]);
+  }, [router, loadAccountNotes]);
 
-  // Warn before closing tab with unsaved changes
+  // Warn before closing window with unsaved changes
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (isVaultDirty) {
+      if (dirtyNoteIds.size > 0) {
         e.preventDefault();
         e.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [isVaultDirty]);
+  }, [dirtyNoteIds.size]);
 
-  // Save Vault (Encrypt & Upload to Blob / Local FS)
-  const saveVaultNow = useCallback(
-    async (vaultOverride?: VaultData, passwordOverride?: string) => {
-      const targetVault = vaultOverride ?? vault;
-      const targetPwd = passwordOverride ?? activePassword;
-      if (!targetVault || !targetPwd || saving) return;
+  // Unlock when session cookie is valid but browser key cache expired
+  const handleUnlockSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !unlockPwd) return;
+    setUnlocking(true);
+    setUnlockError("");
 
-      setSaving(true);
-      try {
-        const ciphertext = await encryptVault(targetVault, targetPwd);
-        const res = await fetch(`/api/vault/${encodeURIComponent(normalizedRoom)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ciphertext }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          throw new Error(data.error || "Save failed");
-        }
-        setServerCiphertext(ciphertext);
-        setSavedVaultSnapshot(structuredClone(targetVault));
-        setLastSavedAt(data.updatedAt || Date.now());
-        saveRoomPassword(normalizedRoom, targetPwd, settings.sessionTtlMinutes);
-        recordRecentRoom(normalizedRoom);
-        showToast("Encrypted & saved to vault", "success");
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : "Save failed", "error");
-        throw err;
-      } finally {
-        setSaving(false);
+    try {
+      const derived = await deriveUserKeys(unlockPwd, user.kdfSalt);
+      // Verify password against server auth verifier
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: user.username, authKey: derived.authKey }),
+      });
+      if (!res.ok) {
+        throw new Error("Incorrect master password.");
       }
+
+      setEncryptionKey(derived.encryptionKey);
+      setSerializedKey(derived.serializedKey);
+      setInMemoryKey(user.id, derived.encryptionKey, derived.serializedKey);
+      saveCachedUserKey(user.id, derived.serializedKey, settings.sessionTtlMinutes);
+      setUnlockPwd("");
+      await loadAccountNotes(user, derived.encryptionKey);
+    } catch (err) {
+      setUnlockError(err instanceof Error ? err.message : "Unlock failed.");
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  // Schedule encrypted IndexedDB crash-recovery draft for a note
+  const scheduleDraftBackup = useCallback(
+    (updated: NoteRecord) => {
+      if (!user || !encryptionKey) return;
+      const existingTimer = draftTimersRef.current.get(updated.id);
+      if (existingTimer) clearTimeout(existingTimer);
+
+      const savedSnap = savedSnapshots.get(updated.id);
+      if (savedSnap && savedSnap === serializeNoteForDiff(updated)) {
+        // User undid back to clean state — remove any stale crash-recovery draft!
+        void deleteEncryptedDraft(updated.id);
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        void saveEncryptedDraft(
+          user.id,
+          updated.id,
+          extractNoteMetadata(updated),
+          updated.content,
+          updated.version,
+          encryptionKey
+        );
+      }, 900);
+      draftTimersRef.current.set(updated.id, timer);
     },
-    [vault, activePassword, saving, normalizedRoom, settings.sessionTtlMinutes, showToast]
+    [user, encryptionKey, savedSnapshots]
   );
 
-  // Optional 3s Debounced Auto-Save
+  // Mutate a note locally in React state + trigger crash-recovery draft
+  const updateLocalNote = useCallback(
+    (noteId: string, updater: (note: NoteRecord) => NoteRecord) => {
+      setNotes((prev) =>
+        prev.map((n) => {
+          if (n.id !== noteId) return n;
+          const next = updater(n);
+          scheduleDraftBackup(next);
+          return next;
+        })
+      );
+    },
+    [scheduleDraftBackup]
+  );
+
+  // Save a single note to Turso with Optimistic Concurrency Conflict Detection
+  const saveNoteById = useCallback(
+    async (noteId: string, opts?: { force?: boolean; noteOverride?: NoteRecord }) => {
+      if (!user || !encryptionKey) return false;
+      const target = opts?.noteOverride ?? notesById.get(noteId);
+      if (!target) return false;
+
+      setSavingIds((prev) => new Set(prev).add(noteId));
+      try {
+        const payload = await encryptNotePayload(
+          extractNoteMetadata(target),
+          target.content,
+          encryptionKey
+        );
+        const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...payload,
+            expectedVersion: target.version,
+            force: Boolean(opts?.force),
+          }),
+        });
+
+        const data = await res.json();
+
+        // Handle multi-device conflict cleanly!
+        if (res.status === 409 && data.conflict && data.remoteNote) {
+          const remoteDecrypted = await decryptNoteDTO(data.remoteNote, encryptionKey);
+          setConflict({
+            noteId,
+            localVersion: target.version,
+            remoteNote: remoteDecrypted,
+          });
+          showToast("Conflict detected: note was updated on another device", "error");
+          return false;
+        }
+
+        if (!res.ok || !data.note) {
+          throw new Error(data.error || "Failed to save note");
+        }
+
+        const syncedNote: NoteRecord = {
+          ...target,
+          version: data.note.version,
+          sizeBytes: data.note.sizeBytes,
+          updatedAt: data.note.updatedAt,
+        };
+
+        setNotes((prev) => prev.map((n) => (n.id === noteId ? syncedNote : n)));
+        setSavedSnapshots((prev) => {
+          const next = new Map(prev);
+          next.set(noteId, serializeNoteForDiff(syncedNote));
+          return next;
+        });
+        setConflict((cur) => (cur?.noteId === noteId ? null : cur));
+        void deleteEncryptedDraft(noteId);
+        if (serializedKey) {
+          saveCachedUserKey(user.id, serializedKey, settings.sessionTtlMinutes);
+        }
+        return true;
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Save failed", "error");
+        return false;
+      } finally {
+        setSavingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(noteId);
+          return next;
+        });
+      }
+    },
+    [user, encryptionKey, notesById, serializedKey, settings.sessionTtlMinutes, showToast]
+  );
+
+  // Create a brand new encrypted note directly in Turso
+  const createNoteOnServer = useCallback(
+    async (
+      title?: string,
+      content = "",
+      folder = "",
+      language?: LanguageMode
+    ): Promise<NoteRecord | null> => {
+      if (!encryptionKey) return null;
+      const finalTitle = title?.trim() || `note-${notes.length + 1}.txt`;
+      const meta: NoteMetadata = {
+        title: finalTitle,
+        folder: folder.trim(),
+        language: language ?? detectLanguageFromFilename(finalTitle),
+        wordWrap: true,
+        bookmarks: [],
+        pinned: false,
+      };
+      const id = generateNoteId();
+      try {
+        const encrypted = await encryptNotePayload(meta, content, encryptionKey);
+        const res = await fetch("/api/notes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, ...encrypted }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.note) {
+          throw new Error(data.error || "Could not create note");
+        }
+        const created: NoteRecord = {
+          id: data.note.id,
+          ...meta,
+          content,
+          version: data.note.version,
+          sizeBytes: data.note.sizeBytes,
+          createdAt: data.note.createdAt,
+          updatedAt: data.note.updatedAt,
+        };
+        setNotes((prev) => [created, ...prev]);
+        setSavedSnapshots((prev) => {
+          const next = new Map(prev);
+          next.set(created.id, serializeNoteForDiff(created));
+          return next;
+        });
+        setOpenTabIds((prev) => (prev.includes(created.id) ? prev : [...prev, created.id]));
+        setActiveNoteId(created.id);
+        setFocusedPane("primary");
+        return created;
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Create note failed", "error");
+        return null;
+      }
+    },
+    [encryptionKey, notes.length, showToast]
+  );
+
+  const handleDeleteNote = async (noteId: string) => {
+    const target = notesById.get(noteId);
+    if (!target) return;
+    if (!window.confirm(`Permanently delete "${target.title}" and its backup history?`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Failed to delete note");
+      void deleteEncryptedDraft(noteId);
+
+      const remainingNotes = notes.filter((n) => n.id !== noteId);
+      const remainingTabs = openTabIds.filter((id) => id !== noteId);
+      setNotes(remainingNotes);
+      setOpenTabIds(remainingTabs);
+      setSavedSnapshots((prev) => {
+        const next = new Map(prev);
+        next.delete(noteId);
+        return next;
+      });
+      if (activeNoteId === noteId) {
+        setActiveNoteId(remainingTabs[0] ?? remainingNotes[0]?.id ?? null);
+      }
+      if (splitNoteId === noteId) {
+        setSplitNoteId(null);
+      }
+      showToast(`Deleted "${target.title}"`, "info");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Delete failed", "error");
+    }
+  };
+
+  const handleSelectNote = (noteId: string) => {
+    setOpenTabIds((prev) => (prev.includes(noteId) ? prev : [...prev, noteId]));
+    setActiveNoteId(noteId);
+    setFocusedPane("primary");
+  };
+
+  const handleCloseTab = (noteId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const target = notesById.get(noteId);
+    if (target && dirtyNoteIds.has(noteId)) {
+      if (
+        !window.confirm(
+          `"${target.title}" has unsaved changes. Close tab? (Unsaved changes remain locally until reload.)`
+        )
+      ) {
+        return;
+      }
+    }
+    setOpenTabIds((prev) => {
+      const idx = prev.indexOf(noteId);
+      const remaining = prev.filter((id) => id !== noteId);
+      if (activeNoteId === noteId) {
+        setActiveNoteId(remaining[Math.max(0, idx - 1)] ?? null);
+      }
+      return remaining;
+    });
+    if (splitNoteId === noteId) setSplitNoteId(null);
+  };
+
+  // Optional 3s Debounced Auto-Save for focused note
   useEffect(() => {
-    if (!settings.autoSave || !isVaultDirty || phase !== "ready" || saving) return;
+    if (!settings.autoSave || phase !== "ready" || !focusedNote) return;
+    if (!dirtyNoteIds.has(focusedNote.id) || savingIds.has(focusedNote.id)) return;
+    if (conflict?.noteId === focusedNote.id) return;
+
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    const targetId = focusedNote.id;
     autoSaveTimerRef.current = setTimeout(() => {
-      void saveVaultNow();
+      void saveNoteById(targetId).then((ok) => {
+        if (ok) showToast("Auto-saved", "success");
+      });
     }, 3000);
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [settings.autoSave, isVaultDirty, phase, saving, saveVaultNow]);
+  }, [
+    settings.autoSave,
+    phase,
+    focusedNote,
+    dirtyNoteIds,
+    savingIds,
+    conflict,
+    saveNoteById,
+    showToast,
+  ]);
 
-  // Unlock Existing Vault
-  const handleUnlockSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!passwordInput) return;
-    setAuthWorking(true);
-    setAuthError("");
-    try {
-      const decrypted = await decryptVault(serverCiphertext, passwordInput);
-      setActivePassword(passwordInput);
-      setVault(decrypted);
-      setSavedVaultSnapshot(structuredClone(decrypted));
-      saveRoomPassword(normalizedRoom, passwordInput, settings.sessionTtlMinutes);
-      recordRecentRoom(normalizedRoom);
-      setPasswordInput("");
-      setPhase("ready");
-    } catch {
-      setAuthError("Incorrect password. Decryption failed.");
-    } finally {
-      setAuthWorking(false);
-    }
-  };
+  // Save Current or Save All
+  const handleSaveActive = useCallback(async () => {
+    if (!focusedNote || !dirtyNoteIds.has(focusedNote.id)) return;
+    const ok = await saveNoteById(focusedNote.id);
+    if (ok) showToast(`Saved "${focusedNote.title}"`, "success");
+  }, [focusedNote, dirtyNoteIds, saveNoteById, showToast]);
 
-  // Create New Vault
-  const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (passwordInput.length < 4) {
-      setAuthError("Use at least 4 characters for your vault password.");
-      return;
+  const handleSaveAll = useCallback(async () => {
+    const dirtyList = Array.from(dirtyNoteIds);
+    if (dirtyList.length === 0) return;
+    const results = await Promise.all(dirtyList.map((id) => saveNoteById(id)));
+    const savedCount = results.filter(Boolean).length;
+    if (savedCount > 0) {
+      showToast(`Encrypted & saved ${savedCount} note(s)`, "success");
     }
-    if (passwordInput !== confirmPasswordInput) {
-      setAuthError("Passwords do not match.");
-      return;
-    }
-    setAuthWorking(true);
-    setAuthError("");
-    try {
-      const initial = createDefaultVault("notes.txt", "");
-      const ciphertext = await encryptVault(initial, passwordInput);
-      const res = await fetch(`/api/vault/${encodeURIComponent(normalizedRoom)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ciphertext }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Could not create vault");
-      }
-      setServerCiphertext(ciphertext);
-      setActivePassword(passwordInput);
-      setVault(initial);
-      setSavedVaultSnapshot(structuredClone(initial));
-      setLastSavedAt(data.updatedAt || Date.now());
-      saveRoomPassword(normalizedRoom, passwordInput, settings.sessionTtlMinutes);
-      recordRecentRoom(normalizedRoom);
-      setPasswordInput("");
-      setConfirmPasswordInput("");
-      setPhase("ready");
-      showToast(`Created encrypted vault /${normalizedRoom}`, "success");
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : "Creation failed");
-    } finally {
-      setAuthWorking(false);
-    }
-  };
+  }, [dirtyNoteIds, saveNoteById, showToast]);
 
-  // Tab Operations
-  const updateTabById = useCallback((tabId: string, updater: (t: NoteTab) => NoteTab) => {
-    setVault((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        tabs: prev.tabs.map((t) => (t.id === tabId ? updater(t) : t)),
-      };
-    });
-  }, []);
-
-  const handleAddTab = (title?: string, content = "", language?: LanguageMode) => {
-    setVault((prev) => {
-      if (!prev) return prev;
-      const nextNum = prev.tabs.length + 1;
-      const tab = createNewTab(title || `note-${nextNum}.txt`, content, language);
-      return {
-        ...prev,
-        activeTabId: tab.id,
-        tabs: [...prev.tabs, tab],
-      };
-    });
-    setFocusedPane("primary");
-  };
-
-  const handleCloseTab = (tabId: string, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    if (!vault) return;
-    if (vault.tabs.length <= 1) {
-      showToast("You need at least one open tab.", "info");
-      return;
-    }
-    const target = vault.tabs.find((t) => t.id === tabId);
-    if (target && isTabDirty(target)) {
-      if (!window.confirm(`"${target.title}" has unsaved changes. Close this tab?`)) {
-        return;
-      }
-    }
-    setVault((prev) => {
-      if (!prev || prev.tabs.length <= 1) return prev;
-      const idx = prev.tabs.findIndex((t) => t.id === tabId);
-      const remaining = prev.tabs.filter((t) => t.id !== tabId);
-      const nextActive =
-        prev.activeTabId === tabId
-          ? remaining[Math.max(0, idx - 1)].id
-          : prev.activeTabId;
-      const nextSplit = prev.splitTabId === tabId ? null : prev.splitTabId;
-      return {
-        ...prev,
-        activeTabId: nextActive,
-        splitTabId: nextSplit === nextActive ? null : nextSplit,
-        tabs: remaining,
-      };
+  // Rename & Folder Move (persist immediately if note wasn't already dirty, or mark modified)
+  const handleRenameNote = (noteId: string, newTitle: string) => {
+    const target = notesById.get(noteId);
+    if (!target || target.title === newTitle) return;
+    const updated: NoteRecord = {
+      ...target,
+      title: newTitle,
+      language: detectLanguageFromFilename(newTitle),
+      updatedAt: Date.now(),
+    };
+    setNotes((prev) => prev.map((n) => (n.id === noteId ? updated : n)));
+    void saveNoteById(noteId, { noteOverride: updated }).then((ok) => {
+      if (ok) showToast(`Renamed to "${newTitle}"`, "success");
     });
   };
 
-  const startRenameTab = (tab: NoteTab) => {
-    setRenamingTabId(tab.id);
-    setRenameValue(tab.title);
-  };
-
-  const commitRenameTab = () => {
-    if (!renamingTabId) return;
-    const cleaned = renameValue.trim();
-    if (cleaned) {
-      updateTabById(renamingTabId, (t) => ({
-        ...t,
-        title: cleaned,
-        language: detectLanguageFromFilename(cleaned),
-        updatedAt: Date.now(),
-      }));
-    }
-    setRenamingTabId(null);
-  };
-
-  const handleToggleSplit = () => {
-    setVault((prev) => {
-      if (!prev) return prev;
-      if (prev.splitTabId) {
-        setFocusedPane("primary");
-        return { ...prev, splitTabId: null };
-      }
-      const other = prev.tabs.find((t) => t.id !== prev.activeTabId);
-      if (other) {
-        return { ...prev, splitTabId: other.id };
-      }
-      // If only 1 tab exists, spin up a scratch tab on the right pane!
-      const scratch = createNewTab("scratch.txt", "");
-      return {
-        ...prev,
-        tabs: [...prev.tabs, scratch],
-        splitTabId: scratch.id,
-      };
+  const handleMoveNoteToFolder = (noteId: string, folder: string) => {
+    const target = notesById.get(noteId);
+    if (!target || target.folder === folder) return;
+    const updated: NoteRecord = { ...target, folder, updatedAt: Date.now() };
+    setNotes((prev) => prev.map((n) => (n.id === noteId ? updated : n)));
+    void saveNoteById(noteId, { noteOverride: updated }).then((ok) => {
+      if (ok) showToast(folder ? `Moved to "${folder}"` : "Moved to root", "success");
     });
   };
 
-  // File Import (File Picker or Drag & Drop)
+  const handleTogglePinNote = (noteId: string) => {
+    const target = notesById.get(noteId);
+    if (!target) return;
+    const updated: NoteRecord = { ...target, pinned: !target.pinned, updatedAt: Date.now() };
+    setNotes((prev) => prev.map((n) => (n.id === noteId ? updated : n)));
+    void saveNoteById(noteId, { noteOverride: updated });
+  };
+
+  // Drag & Drop / File Picker Import
   const importFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (list.length === 0) return;
-
-    const created: NoteTab[] = [];
+    let imported = 0;
     for (const file of list) {
       const text = await file.text();
-      created.push(createNewTab(file.name, text));
+      const created = await createNoteOnServer(file.name, text);
+      if (created) imported++;
     }
-
-    setVault((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        activeTabId: created[0].id,
-        tabs: [...prev.tabs, ...created],
-      };
-    });
-    showToast(
-      created.length === 1
-        ? `Imported "${created[0].title}" into a new tab`
-        : `Imported ${created.length} files into new tabs`,
-      "success"
-    );
+    if (imported > 0) {
+      showToast(
+        imported === 1 ? `Imported "${list[0].name}"` : `Imported ${imported} encrypted notes`,
+        "success"
+      );
+    }
   };
 
-  // Export Downloads
+  // Exports
   const downloadFile = (filename: string, content: string, mime = "text/plain;charset=utf-8") => {
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
@@ -556,34 +730,33 @@ export default function VaultWorkspace({ room }: { room: string }) {
     URL.revokeObjectURL(url);
   };
 
-  const handleExportCurrentTab = () => {
-    if (!focusedTab) return;
-    const ext = LANGUAGE_EXTENSIONS[focusedTab.language] || "txt";
-    const filename = focusedTab.title.includes(".")
-      ? focusedTab.title
-      : `${focusedTab.title}.${ext}`;
-    downloadFile(filename, focusedTab.content);
+  const handleExportCurrentNote = () => {
+    if (!focusedNote) return;
+    const ext = LANGUAGE_EXTENSIONS[focusedNote.language] || "txt";
+    const filename = focusedNote.title.includes(".")
+      ? focusedNote.title
+      : `${focusedNote.title}.${ext}`;
+    downloadFile(filename, focusedNote.content);
     showToast(`Downloaded ${filename}`, "success");
   };
 
-  const handleExportFullBackup = () => {
-    if (!vault) return;
+  const handleExportAllBackup = () => {
     const stamp = new Date().toISOString().slice(0, 10);
     downloadFile(
-      `zeropad-${normalizedRoom}-${stamp}.json`,
-      JSON.stringify(vault, null, 2),
+      `zeropad-${user?.username ?? "backup"}-${stamp}.json`,
+      JSON.stringify({ exportedAt: new Date().toISOString(), notes }, null, 2),
       "application/json"
     );
-    showToast("Downloaded decrypted vault backup (.json)", "success");
+    showToast("Downloaded full decrypted JSON backup", "success");
   };
 
-  // Notepad++ Text Transformations (dispatched through CodeMirror so Cmd+Z undoes them!)
+  // Notepad++ Text Transforms
   const applyTextTransform = (
     name: string,
     fn: (text: string) => { result: string; note?: string } | { error: string }
   ) => {
-    if (!focusedTab) return;
-    const outcome = fn(focusedTab.content);
+    if (!focusedNote) return;
+    const outcome = fn(focusedNote.content);
     if ("error" in outcome) {
       showToast(outcome.error, "error");
       return;
@@ -593,14 +766,11 @@ export default function VaultWorkspace({ room }: { room: string }) {
     setToolsMenuOpen(false);
   };
 
-  // Scanner Jump-to-Match
+  // Scanner Jump-to-Match (opens note tab if needed & highlights exact offset range)
   const handleJumpToScannerMatch = (match: ScannerMatch) => {
-    setVault((prev) => {
-      if (!prev) return prev;
-      return { ...prev, activeTabId: match.tabId };
-    });
+    setOpenTabIds((prev) => (prev.includes(match.noteId) ? prev : [...prev, match.noteId]));
+    setActiveNoteId(match.noteId);
     setFocusedPane("primary");
-    // Wait one animation frame for CodeMirror tab switch to settle
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         primaryEditorRef.current?.jumpToRange(match.startOffset, match.endOffset);
@@ -608,62 +778,164 @@ export default function VaultWorkspace({ room }: { room: string }) {
     });
   };
 
-  // Global Keyboard Shortcuts (Notepad++ & Modern IDE standard)
+  // Split Pane Toggle
+  const handleToggleSplit = async () => {
+    if (splitNoteId) {
+      setSplitNoteId(null);
+      setFocusedPane("primary");
+      return;
+    }
+    const other = notes.find((n) => n.id !== activeNoteId);
+    if (other) {
+      setSplitNoteId(other.id);
+      return;
+    }
+    const scratch = await createNoteOnServer("scratch.txt", "");
+    if (scratch) {
+      setSplitNoteId(scratch.id);
+    }
+  };
+
+  // Account Actions: Sign Out, Lock, Change Master Password, Delete Account
+  const handleSignOut = async () => {
+    if (user) {
+      clearCachedUserKey(user.id);
+      void clearUserDrafts(user.id);
+    }
+    clearInMemoryKey();
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/");
+  };
+
+  const handleLockNow = () => {
+    if (user) clearCachedUserKey(user.id);
+    clearInMemoryKey();
+    setEncryptionKey(null);
+    setSerializedKey("");
+    setNotes([]);
+    setOpenTabIds([]);
+    setActiveNoteId(null);
+    setSplitNoteId(null);
+    setPhase("locked");
+  };
+
+  const handleChangeMasterPassword = async (currentPwd: string, newPwd: string) => {
+    if (!user) throw new Error("Not signed in");
+    const { authKey: currentAuthKey } = await deriveUserKeys(currentPwd, user.kdfSalt);
+    const newKdfSalt = generateSaltBase64();
+    const nextDerived = await deriveUserKeys(newPwd, newKdfSalt);
+
+    const reencryptedNotes = await Promise.all(
+      notes.map(async (n) => {
+        const enc = await encryptNotePayload(
+          extractNoteMetadata(n),
+          n.content,
+          nextDerived.encryptionKey
+        );
+        return { id: n.id, ...enc };
+      })
+    );
+
+    const res = await fetch("/api/auth/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        currentAuthKey,
+        newKdfSalt,
+        newAuthKey: nextDerived.authKey,
+        notes: reencryptedNotes,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Password change failed.");
+    }
+
+    const updatedUser: AuthUser = { ...user, kdfSalt: newKdfSalt };
+    setUser(updatedUser);
+    setEncryptionKey(nextDerived.encryptionKey);
+    setSerializedKey(nextDerived.serializedKey);
+    setInMemoryKey(user.id, nextDerived.encryptionKey, nextDerived.serializedKey);
+    saveCachedUserKey(user.id, nextDerived.serializedKey, settings.sessionTtlMinutes);
+
+    // Bump versions locally and refresh clean snapshots
+    const bumped = notes.map((n) => ({ ...n, version: n.version + 1 }));
+    setNotes(bumped);
+    const snapMap = new Map<string, string>();
+    for (const n of bumped) snapMap.set(n.id, serializeNoteForDiff(n));
+    setSavedSnapshots(snapMap);
+    void clearUserDrafts(user.id);
+  };
+
+  const handleDeleteAccount = async (pwd: string) => {
+    if (!user) return;
+    const { authKey } = await deriveUserKeys(pwd, user.kdfSalt);
+    const res = await fetch("/api/auth/me", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ authKey }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to delete account.");
+    }
+    clearCachedUserKey(user.id);
+    clearInMemoryKey();
+    void clearUserDrafts(user.id);
+    router.replace("/");
+  };
+
+  // Global Keyboard Shortcuts
   useEffect(() => {
     if (phase !== "ready") return;
 
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
 
-      // Cmd/Ctrl + S → Save
-      if (mod && e.key.toLowerCase() === "s") {
+      if (mod && e.shiftKey && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        if (isVaultDirty && !saving) {
-          void saveVaultNow();
-        }
+        void handleSaveAll();
         return;
       }
-
-      // Cmd/Ctrl + Shift + F → Boolean Block Scanner
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void handleSaveActive();
+        return;
+      }
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSidebarOpen((v) => !v);
+        return;
+      }
       if (mod && e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setFindOpen(false);
         setScannerOpen(true);
         return;
       }
-
-      // Cmd/Ctrl + F → Find Bar
       if (mod && !e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setFindShowReplace(false);
         setFindOpen(true);
         return;
       }
-
-      // Cmd/Ctrl + H → Find & Replace Bar
       if (mod && e.key.toLowerCase() === "h") {
         e.preventDefault();
         setFindShowReplace(true);
         setFindOpen(true);
         return;
       }
-
-      // Cmd/Ctrl + G → Go to Line
       if (mod && !e.shiftKey && e.key.toLowerCase() === "g") {
         e.preventDefault();
         setGoToLineInput(String(cursorStats.line));
         setGoToLineOpen(true);
         return;
       }
-
-      // Cmd/Ctrl + Shift + D → Insert Date Header Stamp
       if (mod && e.shiftKey && e.key.toLowerCase() === "d") {
         e.preventDefault();
         getFocusedEditor()?.insertAtCursor(`${createDateStamp()}\n`);
         return;
       }
-
-      // Cmd/Ctrl + F2 → Toggle Bookmark | F2 → Jump Next Bookmark
       if (e.key === "F2") {
         e.preventDefault();
         if (mod) {
@@ -674,11 +946,10 @@ export default function VaultWorkspace({ room }: { room: string }) {
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [phase, isVaultDirty, saving, saveVaultNow, cursorStats.line]);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [phase, handleSaveActive, handleSaveAll, cursorStats.line]);
 
-  // Close menus on outside click
   useEffect(() => {
     if (!toolsMenuOpen) return;
     const close = () => setToolsMenuOpen(false);
@@ -686,7 +957,6 @@ export default function VaultWorkspace({ room }: { room: string }) {
     return () => window.removeEventListener("click", close);
   }, [toolsMenuOpen]);
 
-  // Find & Replace wiring
   const handleFindOptionsChange = useCallback(
     (opts: SearchOptions) => {
       const ed = getFocusedEditor();
@@ -694,7 +964,7 @@ export default function VaultWorkspace({ room }: { room: string }) {
       setFindSummary(ed.updateSearchHighlights(opts));
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [focusedPane, splitTab?.id]
+    [focusedPane, splitNoteId]
   );
 
   const handleFindClose = () => {
@@ -705,100 +975,70 @@ export default function VaultWorkspace({ room }: { room: string }) {
   };
 
   // ==========================================
-  // Render: Checking / Unlock / Create Screens
+  // Render: Checking / Locked Screen
   // ==========================================
 
   if (phase === "checking") {
     return (
       <div className="h-screen w-screen bg-[#0b0e14] flex flex-col items-center justify-center gap-3 text-[#8b949e]">
         <Loader2 className="w-6 h-6 animate-spin text-emerald-400" />
-        <p className="text-xs font-mono">Connecting to encrypted vault /{normalizedRoom}...</p>
+        <p className="text-xs font-mono">Decrypting your workspace...</p>
       </div>
     );
   }
 
-  if (phase === "unlock" || phase === "create") {
-    const isCreate = phase === "create";
+  if (phase === "locked" && user) {
     return (
       <div className="h-screen w-screen bg-[#0b0e14] flex flex-col items-center justify-center p-4">
         <div className="w-full max-w-md rounded-2xl bg-[#131820] border border-[#2b323d] p-7 shadow-2xl shadow-black/60 space-y-5">
           <div className="flex items-center justify-between">
-            <Link
-              href="/"
-              className="inline-flex items-center gap-2 text-xs text-[#8b949e] hover:text-white transition-colors"
-            >
+            <div className="inline-flex items-center gap-2 text-xs text-white font-semibold">
               <Lock className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="font-semibold text-white">ZeroPad</span>
-            </Link>
+              <span>ZeroPad</span>
+            </div>
             <span className="text-xs font-mono px-2.5 py-1 rounded-full bg-[#1b222c] text-emerald-400 border border-emerald-500/20">
-              /{normalizedRoom}
+              @{user.username}
             </span>
           </div>
 
           <div className="space-y-1.5">
-            <h1 className="text-xl font-bold text-white">
-              {isCreate ? "Create New Encrypted Vault" : "Unlock Vault"}
-            </h1>
+            <h1 className="text-xl font-bold text-white">Unlock Your Vault</h1>
             <p className="text-xs text-[#8b949e] leading-relaxed">
-              {isCreate
-                ? "This room does not exist yet. Set a password to encrypt your multi-tab workspace locally before saving."
-                : "Enter your password to decrypt this vault in your browser. ZeroPad never sends your password to the server."}
+              Your session is active, but your browser encryption key expired. Re-enter your
+              master password to decrypt your notes locally.
             </p>
           </div>
 
-          <form
-            onSubmit={isCreate ? handleCreateSubmit : handleUnlockSubmit}
-            className="space-y-3"
-          >
-            <div>
-              <label className="block text-xs text-[#c9d1d9] mb-1">Password</label>
-              <input
-                type="password"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                placeholder="Enter vault password"
-                autoFocus
-                required
-                autoComplete={isCreate ? "new-password" : "current-password"}
-                className="w-full px-3.5 py-2.5 rounded-lg bg-[#0b0e14] border border-[#30363d] focus:border-emerald-500 text-sm text-white outline-none"
-              />
-            </div>
-
-            {isCreate ? (
-              <div>
-                <label className="block text-xs text-[#c9d1d9] mb-1">Confirm Password</label>
-                <input
-                  type="password"
-                  value={confirmPasswordInput}
-                  onChange={(e) => setConfirmPasswordInput(e.target.value)}
-                  placeholder="Re-enter vault password"
-                  required
-                  autoComplete="new-password"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-[#0b0e14] border border-[#30363d] focus:border-emerald-500 text-sm text-white outline-none"
-                />
-              </div>
-            ) : null}
-
-            {authError ? (
+          <form onSubmit={handleUnlockSubmit} className="space-y-3">
+            <input
+              type="password"
+              value={unlockPwd}
+              onChange={(e) => setUnlockPwd(e.target.value)}
+              placeholder="Master password"
+              autoFocus
+              required
+              autoComplete="current-password"
+              className="w-full px-3.5 py-2.5 rounded-lg bg-[#0b0e14] border border-[#30363d] focus:border-emerald-500 text-sm text-white outline-none"
+            />
+            {unlockError ? (
               <p className="text-xs text-rose-400 bg-rose-950/30 border border-rose-500/30 rounded-lg px-3 py-2">
-                {authError}
+                {unlockError}
               </p>
             ) : null}
-
             <button
               type="submit"
-              disabled={authWorking}
+              disabled={unlocking}
               className="w-full py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-[#0b0e14] font-semibold text-sm inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
             >
-              {authWorking ? (
+              {unlocking ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{isCreate ? "Encrypting & creating..." : "Decrypting..."}</span>
+                  <span>Decrypting...</span>
                 </>
               ) : (
                 <>
                   <KeyRound className="w-4 h-4" />
-                  <span>{isCreate ? "Create Encrypted Vault" : "Unlock Vault"}</span>
+                  <span>Unlock Vault</span>
                 </>
               )}
             </button>
@@ -807,20 +1047,29 @@ export default function VaultWorkspace({ room }: { room: string }) {
           <div className="pt-2 border-t border-[#1f2630] flex items-center justify-between text-[11px] text-[#6e7681]">
             <span className="inline-flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-500/80" />
-              AES-256-GCM • 200k PBKDF2
+              AES-256-GCM
             </span>
-            <span>Session cached {settings.sessionTtlMinutes}m</span>
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              className="inline-flex items-center gap-1 text-[#8b949e] hover:text-white cursor-pointer"
+            >
+              <LogOut className="w-3 h-3" />
+              <span>Sign out / Switch account</span>
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
-  // ==========================================
-  // Render: Main Notepad++ Workspace
-  // ==========================================
+  if (!user) return null;
 
-  if (!vault || !activeTab) return null;
+  const isFocusedDirty = focusedNote ? dirtyNoteIds.has(focusedNote.id) : false;
+  const isAnySaving = savingIds.size > 0;
+  const openTabs = openTabIds
+    .map((id) => notesById.get(id))
+    .filter((n): n is NoteRecord => Boolean(n));
 
   return (
     <div
@@ -858,57 +1107,48 @@ export default function VaultWorkspace({ room }: { room: string }) {
       {dragOver ? (
         <div className="fixed inset-0 z-50 bg-emerald-950/70 backdrop-blur-sm border-2 border-dashed border-emerald-400 flex flex-col items-center justify-center gap-2 pointer-events-none">
           <Upload className="w-10 h-10 text-emerald-300" />
-          <p className="text-base font-semibold text-white">Drop files to import into new tabs</p>
+          <p className="text-base font-semibold text-white">Drop files to import into your encrypted account</p>
         </div>
       ) : null}
 
       {/* Top Command Toolbar */}
       <header className="h-11 px-3 bg-[#131820] border-b border-[#21262d] flex items-center justify-between gap-2 shrink-0">
-        {/* Left: Brand + Room Slug + Status */}
+        {/* Left: Sidebar toggle + Brand + Status */}
         <div className="flex items-center gap-2 min-w-0">
-          <Link
-            href="/"
-            title="Switch Vault"
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[#1d2430] transition-colors shrink-0"
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((v) => !v)}
+            title="Toggle File Explorer Sidebar (Cmd/Ctrl+B)"
+            className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+              sidebarOpen
+                ? "bg-[#1d2430] text-white"
+                : "text-[#8b949e] hover:bg-[#1d2430] hover:text-white"
+            }`}
           >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+
+          <div className="flex items-center gap-1.5 shrink-0">
             <div className="w-5 h-5 rounded bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center">
               <Lock className="w-3 h-3 text-[#0b0e14] stroke-[2.5]" />
             </div>
             <span className="font-semibold text-xs text-white hidden sm:inline">ZeroPad</span>
-          </Link>
-
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(window.location.origin + "/" + normalizedRoom);
-                setCopiedUrl(true);
-                setTimeout(() => setCopiedUrl(false), 1500);
-              } catch {
-                // Ignore
-              }
-            }}
-            title="Copy vault URL"
-            className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#0b0e14] border border-[#262e3a] hover:border-[#3c485a] text-xs font-mono text-[#c9d1d9] truncate max-w-[160px] cursor-pointer"
-          >
-            <span className="truncate">/{normalizedRoom}</span>
-            {copiedUrl ? (
-              <Check className="w-3 h-3 text-emerald-400 shrink-0" />
-            ) : (
-              <Copy className="w-3 h-3 text-[#6e7681] shrink-0" />
-            )}
-          </button>
+          </div>
 
           <span
             className={`text-[11px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
-              saving
+              isAnySaving
                 ? "bg-sky-500/20 text-sky-300"
-                : isVaultDirty
+                : dirtyNoteIds.size > 0
                   ? "bg-amber-500/20 text-amber-300"
                   : "bg-emerald-500/15 text-emerald-400"
             }`}
           >
-            {saving ? "Encrypting..." : isVaultDirty ? "Modified" : "Synced"}
+            {isAnySaving
+              ? "Syncing..."
+              : dirtyNoteIds.size > 0
+                ? `${dirtyNoteIds.size} Unsaved`
+                : "Synced"}
           </span>
         </div>
 
@@ -920,8 +1160,9 @@ export default function VaultWorkspace({ room }: { room: string }) {
               setFindShowReplace(false);
               setFindOpen((v) => !v);
             }}
+            disabled={!focusedNote}
             title="Find & Replace (Cmd/Ctrl+F or Cmd/Ctrl+H)"
-            className={`px-2.5 py-1.5 rounded-md text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+            className={`px-2.5 py-1.5 rounded-md text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-30 ${
               findOpen
                 ? "bg-[#1f6feb]/25 text-sky-300 border border-[#1f6feb]/40"
                 : "text-[#c9d1d9] hover:bg-[#1e2530]"
@@ -934,7 +1175,7 @@ export default function VaultWorkspace({ room }: { room: string }) {
           <button
             type="button"
             onClick={() => setScannerOpen(true)}
-            title="Boolean Block Scanner (Cmd/Ctrl+Shift+F)"
+            title="Boolean Block Scanner across all notes (Cmd/Ctrl+Shift+F)"
             className="px-2.5 py-1.5 rounded-md text-xs inline-flex items-center gap-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/25 transition-colors cursor-pointer"
           >
             <Sparkles className="w-3.5 h-3.5" />
@@ -943,10 +1184,11 @@ export default function VaultWorkspace({ room }: { room: string }) {
 
           <button
             type="button"
-            onClick={handleToggleSplit}
+            onClick={() => void handleToggleSplit()}
+            disabled={!activeNote}
             title="Toggle Dual Split Pane"
-            className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-              vault.splitTabId
+            className={`p-1.5 rounded-md transition-colors cursor-pointer disabled:opacity-30 ${
+              splitNoteId
                 ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
                 : "text-[#8b949e] hover:bg-[#1e2530] hover:text-white"
             }`}
@@ -954,7 +1196,7 @@ export default function VaultWorkspace({ room }: { room: string }) {
             <Columns2 className="w-4 h-4" />
           </button>
 
-          {/* Notepad++ Tools Dropdown */}
+          {/* Tools Menu */}
           <div className="relative">
             <button
               type="button"
@@ -962,7 +1204,7 @@ export default function VaultWorkspace({ room }: { room: string }) {
                 e.stopPropagation();
                 setToolsMenuOpen((v) => !v);
               }}
-              title="Text Tools, Bookmarks, Import & Export"
+              title="Notepad++ Text Tools, Bookmarks, Import & Export"
               className={`px-2 py-1.5 rounded-md text-xs inline-flex items-center gap-1 transition-colors cursor-pointer ${
                 toolsMenuOpen
                   ? "bg-[#21262d] text-white"
@@ -1109,29 +1351,29 @@ export default function VaultWorkspace({ room }: { room: string }) {
                   className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center gap-2 cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Import File(s) into New Tab</span>
+                  <span>Import File(s) into Account</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    handleExportCurrentTab();
+                    handleExportCurrentNote();
                     setToolsMenuOpen(false);
                   }}
                   className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center gap-2 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Download Current Tab</span>
+                  <span>Download Current Note</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    handleExportFullBackup();
+                    handleExportAllBackup();
                     setToolsMenuOpen(false);
                   }}
                   className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center gap-2 cursor-pointer"
                 >
                   <FilePlus className="w-3.5 h-3.5 text-violet-400" />
-                  <span>Export All Tabs (.json)</span>
+                  <span>Export All Notes (.json)</span>
                 </button>
               </div>
             ) : null}
@@ -1140,8 +1382,9 @@ export default function VaultWorkspace({ room }: { room: string }) {
           <button
             type="button"
             onClick={() => setHistoryOpen(true)}
-            title="Encrypted Revision History (Last 10 Saves)"
-            className="p-1.5 rounded-md text-[#8b949e] hover:bg-[#1e2530] hover:text-violet-300 transition-colors cursor-pointer"
+            disabled={!focusedNote}
+            title="Encrypted Revision History (Last 10 Saves of Active Note)"
+            className="p-1.5 rounded-md text-[#8b949e] hover:bg-[#1e2530] hover:text-violet-300 transition-colors cursor-pointer disabled:opacity-30"
           >
             <History className="w-4 h-4" />
           </button>
@@ -1149,24 +1392,36 @@ export default function VaultWorkspace({ room }: { room: string }) {
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            title="Workspace Settings & Security"
+            title="Settings, Password & Account"
             className="p-1.5 rounded-md text-[#8b949e] hover:bg-[#1e2530] hover:text-white transition-colors cursor-pointer"
           >
             <Settings className="w-4 h-4" />
           </button>
 
+          {dirtyNoteIds.size > 1 ? (
+            <button
+              type="button"
+              onClick={() => void handleSaveAll()}
+              disabled={isAnySaving}
+              title="Save All Modified Notes (Cmd/Ctrl+Shift+S)"
+              className="ml-0.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-[#1e2632] hover:bg-[#2a3444] text-emerald-300 border border-emerald-500/30 cursor-pointer"
+            >
+              Save All ({dirtyNoteIds.size})
+            </button>
+          ) : null}
+
           <button
             type="button"
-            onClick={() => void saveVaultNow()}
-            disabled={!isVaultDirty || saving}
-            title="Encrypt & Save Vault (Cmd/Ctrl+S)"
+            onClick={() => void handleSaveActive()}
+            disabled={!isFocusedDirty || isAnySaving}
+            title="Encrypt & Save Active Note (Cmd/Ctrl+S)"
             className={`ml-1 px-3 py-1.5 rounded-md text-xs font-semibold inline-flex items-center gap-1.5 transition-all ${
-              isVaultDirty && !saving
+              isFocusedDirty && !isAnySaving
                 ? "bg-emerald-500 hover:bg-emerald-400 text-[#0b0e14] cursor-pointer shadow-md shadow-emerald-500/20"
                 : "bg-[#1c222b] text-[#6e7681] cursor-not-allowed"
             }`}
           >
-            {saving ? (
+            {isAnySaving ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
               <Save className="w-3.5 h-3.5" />
@@ -1177,227 +1432,330 @@ export default function VaultWorkspace({ room }: { room: string }) {
         </div>
       </header>
 
-      {/* Multi-Tab Bar (Notepad++ Style) */}
-      <div className="h-9 bg-[#0e1218] border-b border-[#21262d] flex items-center px-1.5 gap-1 overflow-x-auto shrink-0 select-none">
-        {vault.tabs.map((tab) => {
-          const isActive = tab.id === activeTab.id;
-          const isSplit = tab.id === splitTab?.id;
-          const dirty = isTabDirty(tab);
-          const isRenaming = renamingTabId === tab.id;
-
-          return (
-            <div
-              key={tab.id}
-              onClick={() => {
-                setVault((prev) => (prev ? { ...prev, activeTabId: tab.id } : prev));
-                setFocusedPane("primary");
-              }}
-              onDoubleClick={() => startRenameTab(tab)}
-              title="Double-click to rename tab"
-              className={`group h-7 px-2.5 rounded-t-md flex items-center gap-2 text-xs font-mono border-t border-x transition-colors cursor-pointer shrink-0 max-w-[200px] ${
-                isActive
-                  ? "bg-[#0d1117] border-[#30363d] text-white"
-                  : isSplit
-                    ? "bg-[#131a24] border-cyan-500/30 text-cyan-200"
-                    : "bg-transparent border-transparent text-[#8b949e] hover:bg-[#161b22] hover:text-[#c9d1d9]"
-              }`}
-            >
-              {tab.language === "plain" ? (
-                <FileText className="w-3 h-3 text-[#6e7681] shrink-0" />
-              ) : (
-                <FileCode2 className="w-3 h-3 text-emerald-400/80 shrink-0" />
-              )}
-
-              {isRenaming ? (
-                <input
-                  type="text"
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={commitRenameTab}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitRenameTab();
-                    if (e.key === "Escape") setRenamingTabId(null);
-                  }}
-                  autoFocus
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-24 bg-[#161b22] border border-emerald-500 rounded px-1 text-xs text-white outline-none"
-                />
-              ) : (
-                <span className="truncate">{tab.title}</span>
-              )}
-
-              {dirty ? (
-                <span
-                  title="Unsaved changes"
-                  className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
-                />
-              ) : null}
-
-              {vault.tabs.length > 1 ? (
-                <button
-                  type="button"
-                  onClick={(e) => handleCloseTab(tab.id, e)}
-                  title="Close tab"
-                  className="p-0.5 rounded text-[#6e7681] hover:text-white hover:bg-[#262e3a] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              ) : null}
-            </div>
-          );
-        })}
-
-        <button
-          type="button"
-          onClick={() => handleAddTab()}
-          title="New Tab"
-          className="h-7 w-7 rounded-md flex items-center justify-center text-[#8b949e] hover:text-white hover:bg-[#1b222c] transition-colors cursor-pointer shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Main Editor Area (Single or Split Pane) */}
-      <main className="flex-1 flex min-h-0 relative">
-        {/* Docked Find & Replace Bar */}
-        <FindReplaceBar
-          open={findOpen}
-          initialShowReplace={findShowReplace}
-          summary={findSummary}
-          onOptionsChange={handleFindOptionsChange}
-          onStep={(opts, dir) => {
-            const ed = getFocusedEditor();
-            if (ed) setFindSummary(ed.findStep(opts, dir));
-          }}
-          onReplaceOne={(opts) => {
-            const ed = getFocusedEditor();
-            if (ed) setFindSummary(ed.replaceCurrent(opts));
-          }}
-          onReplaceAll={(opts) => {
-            const ed = getFocusedEditor();
-            if (!ed) return;
-            const res = ed.replaceAllMatches(opts);
-            if (res.error) {
-              showToast(res.error, "error");
-            } else {
-              setFindSummary({ total: 0, currentIndex: 0 });
-              showToast(`Replaced ${res.replaced} occurrence(s) (⌘Z to undo)`, "success");
-            }
-          }}
-          onClose={handleFindClose}
+      {/* Body: Collapsible File Sidebar + Tabbed Editor */}
+      <div className="flex-1 flex min-h-0">
+        <FileSidebar
+          open={sidebarOpen}
+          username={user.username}
+          notes={notes}
+          activeNoteId={activeNoteId}
+          dirtyNoteIds={dirtyNoteIds}
+          extraFolders={extraFolders}
+          totalBytes={totalAccountBytes}
+          onSelectNote={handleSelectNote}
+          onCreateNote={(folder) => void createNoteOnServer(undefined, "", folder ?? "")}
+          onCreateFolder={(name) =>
+            setExtraFolders((prev) => (prev.includes(name) ? prev : [...prev, name]))
+          }
+          onRenameNote={handleRenameNote}
+          onMoveNoteToFolder={handleMoveNoteToFolder}
+          onTogglePinNote={handleTogglePinNote}
+          onDeleteNote={(id) => void handleDeleteNote(id)}
+          onTriggerImport={() => fileInputRef.current?.click()}
         />
 
-        {/* Primary Editor Pane */}
-        <div
-          className={`flex-1 flex flex-col min-w-0 h-full ${
-            splitTab ? "border-r border-[#262e3a]" : ""
-          }`}
-        >
-          <CodeEditor
-            ref={primaryEditorRef}
-            tabId={activeTab.id}
-            content={activeTab.content}
-            language={activeTab.language}
-            wordWrap={activeTab.wordWrap}
-            bookmarks={activeTab.bookmarks}
-            theme={settings.theme}
-            fontSize={settings.fontSize}
-            tabSize={settings.tabSize}
-            showLineNumbers={settings.showLineNumbers}
-            onChange={(next) =>
-              updateTabById(activeTab.id, (t) => ({
-                ...t,
-                content: next,
-                updatedAt: Date.now(),
-              }))
-            }
-            onBookmarksChange={(nextBm) =>
-              updateTabById(activeTab.id, (t) => ({ ...t, bookmarks: nextBm }))
-            }
-            onCursorChange={(stats) => {
-              if (focusedPane === "primary") setCursorStats(stats);
-            }}
-            onFocusPane={() => setFocusedPane("primary")}
-          />
-        </div>
+        {/* Right Side: Tab Bar + Conflict Banner + Editor Panes */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {/* Open Tabs Bar */}
+          <div className="h-9 bg-[#0e1218] border-b border-[#21262d] flex items-center px-1.5 gap-1 overflow-x-auto shrink-0 select-none">
+            {openTabs.map((tab) => {
+              const isActive = tab.id === activeNoteId;
+              const isSplit = tab.id === splitNoteId;
+              const dirty = dirtyNoteIds.has(tab.id);
+              const isRenaming = renamingTabId === tab.id;
 
-        {/* Optional Split Pane (Dual View) */}
-        {splitTab ? (
-          <div className="flex-1 flex flex-col min-w-0 h-full">
-            <div className="h-8 px-3 bg-[#11161e] border-b border-[#21262d] flex items-center justify-between gap-2 shrink-0">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-[10px] uppercase tracking-wider text-cyan-400 font-semibold">
-                  Split View
-                </span>
-                <select
-                  value={splitTab.id}
-                  onChange={(e) =>
-                    setVault((prev) =>
-                      prev ? { ...prev, splitTabId: e.target.value } : prev
-                    )
-                  }
-                  className="bg-[#0b0e14] border border-[#2b323d] rounded px-2 py-0.5 text-xs font-mono text-white outline-none"
+              return (
+                <div
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveNoteId(tab.id);
+                    setFocusedPane("primary");
+                  }}
+                  onDoubleClick={() => {
+                    setRenamingTabId(tab.id);
+                    setRenameValue(tab.title);
+                  }}
+                  title="Double-click to rename"
+                  className={`group h-7 px-2.5 rounded-t-md flex items-center gap-2 text-xs font-mono border-t border-x transition-colors cursor-pointer shrink-0 max-w-[200px] ${
+                    isActive
+                      ? "bg-[#0d1117] border-[#30363d] text-white"
+                      : isSplit
+                        ? "bg-[#131a24] border-cyan-500/30 text-cyan-200"
+                        : "bg-transparent border-transparent text-[#8b949e] hover:bg-[#161b22] hover:text-[#c9d1d9]"
+                  }`}
                 >
-                  {vault.tabs.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <button
-                type="button"
-                onClick={() =>
-                  setVault((prev) => (prev ? { ...prev, splitTabId: null } : prev))
-                }
-                title="Close split pane"
-                className="p-1 rounded text-[#8b949e] hover:bg-[#21262d] hover:text-white cursor-pointer"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            <div className="flex-1 min-h-0">
-              <CodeEditor
-                ref={splitEditorRef}
-                tabId={splitTab.id}
-                content={splitTab.content}
-                language={splitTab.language}
-                wordWrap={splitTab.wordWrap}
-                bookmarks={splitTab.bookmarks}
-                theme={settings.theme}
-                fontSize={settings.fontSize}
-                tabSize={settings.tabSize}
-                showLineNumbers={settings.showLineNumbers}
-                onChange={(next) =>
-                  updateTabById(splitTab.id, (t) => ({
-                    ...t,
-                    content: next,
-                    updatedAt: Date.now(),
-                  }))
-                }
-                onBookmarksChange={(nextBm) =>
-                  updateTabById(splitTab.id, (t) => ({ ...t, bookmarks: nextBm }))
-                }
-                onCursorChange={(stats) => {
-                  if (focusedPane === "split") setCursorStats(stats);
-                }}
-                onFocusPane={() => setFocusedPane("split")}
-              />
-            </div>
+                  {tab.language === "plain" ? (
+                    <FileText className="w-3 h-3 text-[#6e7681] shrink-0" />
+                  ) : (
+                    <FileCode2 className="w-3 h-3 text-emerald-400/80 shrink-0" />
+                  )}
+
+                  {isRenaming ? (
+                    <input
+                      type="text"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={() => {
+                        if (renameValue.trim()) handleRenameNote(tab.id, renameValue.trim());
+                        setRenamingTabId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          if (renameValue.trim()) handleRenameNote(tab.id, renameValue.trim());
+                          setRenamingTabId(null);
+                        } else if (e.key === "Escape") {
+                          setRenamingTabId(null);
+                        }
+                      }}
+                      autoFocus
+                      onClick={(e) => e.stopPropagation()}
+                      className="w-24 bg-[#161b22] border border-emerald-500 rounded px-1 text-xs text-white outline-none"
+                    />
+                  ) : (
+                    <span className="truncate">{tab.title}</span>
+                  )}
+
+                  {dirty ? (
+                    <span
+                      title="Unsaved changes"
+                      className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
+                    />
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={(e) => handleCloseTab(tab.id, e)}
+                    title="Close tab"
+                    className="p-0.5 rounded text-[#6e7681] hover:text-white hover:bg-[#262e3a] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              );
+            })}
+
+            <button
+              type="button"
+              onClick={() => void createNoteOnServer()}
+              title="New Note Tab"
+              className="h-7 w-7 rounded-md flex items-center justify-center text-[#8b949e] hover:text-white hover:bg-[#1b222c] transition-colors cursor-pointer shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
           </div>
-        ) : null}
-      </main>
+
+          {/* Multi-Device Conflict Resolution Banner */}
+          {conflict && (conflict.noteId === activeNoteId || conflict.noteId === splitNoteId) ? (
+            <div className="px-4 py-2 bg-amber-950/60 border-b border-amber-500/40 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 text-amber-200">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  <strong>Sync conflict:</strong> &quot;{conflict.remoteNote.title}&quot; was saved
+                  on another device (Cloud v{conflict.remoteNote.version} vs your v
+                  {conflict.localVersion}).
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const remote = conflict.remoteNote;
+                    setNotes((prev) => prev.map((n) => (n.id === remote.id ? remote : n)));
+                    setSavedSnapshots((prev) => {
+                      const next = new Map(prev);
+                      next.set(remote.id, serializeNoteForDiff(remote));
+                      return next;
+                    });
+                    void deleteEncryptedDraft(remote.id);
+                    setConflict(null);
+                    showToast("Loaded latest cloud version", "info");
+                  }}
+                  className="px-2.5 py-1 rounded bg-[#161b22] hover:bg-[#21262d] text-white border border-[#30363d] inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Load Cloud v{conflict.remoteNote.version}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const copy = await createNoteOnServer(
+                      `${conflict.remoteNote.title} (cloud-v${conflict.remoteNote.version})`,
+                      conflict.remoteNote.content,
+                      conflict.remoteNote.folder,
+                      conflict.remoteNote.language
+                    );
+                    if (copy) setSplitNoteId(copy.id);
+                  }}
+                  className="px-2.5 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-500/40 cursor-pointer"
+                >
+                  Compare in Split View
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void saveNoteById(conflict.noteId, { force: true }).then((ok) => {
+                      if (ok) showToast("Overwrote cloud with your version", "success");
+                    })
+                  }
+                  className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-[#0b0e14] font-semibold cursor-pointer"
+                >
+                  Force Save Mine
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {/* Main Editor Area */}
+          <main className="flex-1 flex min-h-0 relative">
+            <FindReplaceBar
+              open={findOpen}
+              initialShowReplace={findShowReplace}
+              summary={findSummary}
+              onOptionsChange={handleFindOptionsChange}
+              onStep={(opts, dir) => {
+                const ed = getFocusedEditor();
+                if (ed) setFindSummary(ed.findStep(opts, dir));
+              }}
+              onReplaceOne={(opts) => {
+                const ed = getFocusedEditor();
+                if (ed) setFindSummary(ed.replaceCurrent(opts));
+              }}
+              onReplaceAll={(opts) => {
+                const ed = getFocusedEditor();
+                if (!ed) return;
+                const res = ed.replaceAllMatches(opts);
+                if (res.error) {
+                  showToast(res.error, "error");
+                } else {
+                  setFindSummary({ total: 0, currentIndex: 0 });
+                  showToast(`Replaced ${res.replaced} occurrence(s) (⌘Z to undo)`, "success");
+                }
+              }}
+              onClose={handleFindClose}
+            />
+
+            {!activeNote ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-6 text-[#6e7681] space-y-3">
+                <FileCode2 className="w-10 h-10 opacity-25" />
+                <p className="text-sm text-[#8b949e]">Select a note from the sidebar or create a new one.</p>
+                <button
+                  type="button"
+                  onClick={() => void createNoteOnServer()}
+                  className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-[#0b0e14] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>New Encrypted Note</span>
+                </button>
+              </div>
+            ) : (
+              <>
+                <div
+                  className={`flex-1 flex flex-col min-w-0 h-full ${
+                    splitNote ? "border-r border-[#262e3a]" : ""
+                  }`}
+                >
+                  <CodeEditor
+                    ref={primaryEditorRef}
+                    tabId={activeNote.id}
+                    content={activeNote.content}
+                    language={activeNote.language}
+                    wordWrap={activeNote.wordWrap}
+                    bookmarks={activeNote.bookmarks}
+                    theme={settings.theme}
+                    fontSize={settings.fontSize}
+                    tabSize={settings.tabSize}
+                    showLineNumbers={settings.showLineNumbers}
+                    onChange={(next) =>
+                      updateLocalNote(activeNote.id, (n) => ({
+                        ...n,
+                        content: next,
+                        sizeBytes: new TextEncoder().encode(next).length,
+                      }))
+                    }
+                    onBookmarksChange={(nextBm) =>
+                      updateLocalNote(activeNote.id, (n) => ({ ...n, bookmarks: nextBm }))
+                    }
+                    onCursorChange={(stats) => {
+                      if (focusedPane === "primary") setCursorStats(stats);
+                    }}
+                    onFocusPane={() => setFocusedPane("primary")}
+                  />
+                </div>
+
+                {splitNote ? (
+                  <div className="flex-1 flex flex-col min-w-0 h-full">
+                    <div className="h-8 px-3 bg-[#11161e] border-b border-[#21262d] flex items-center justify-between gap-2 shrink-0">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-[10px] uppercase tracking-wider text-cyan-400 font-semibold">
+                          Split View
+                        </span>
+                        <select
+                          value={splitNote.id}
+                          onChange={(e) => setSplitNoteId(e.target.value)}
+                          className="bg-[#0b0e14] border border-[#2b323d] rounded px-2 py-0.5 text-xs font-mono text-white outline-none"
+                        >
+                          {notes.map((n) => (
+                            <option key={n.id} value={n.id}>
+                              {n.folder ? `${n.folder} / ` : ""}
+                              {n.title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSplitNoteId(null)}
+                        title="Close split pane"
+                        className="p-1 rounded text-[#8b949e] hover:bg-[#21262d] hover:text-white cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      <CodeEditor
+                        ref={splitEditorRef}
+                        tabId={splitNote.id}
+                        content={splitNote.content}
+                        language={splitNote.language}
+                        wordWrap={splitNote.wordWrap}
+                        bookmarks={splitNote.bookmarks}
+                        theme={settings.theme}
+                        fontSize={settings.fontSize}
+                        tabSize={settings.tabSize}
+                        showLineNumbers={settings.showLineNumbers}
+                        onChange={(next) =>
+                          updateLocalNote(splitNote.id, (n) => ({
+                            ...n,
+                            content: next,
+                            sizeBytes: new TextEncoder().encode(next).length,
+                          }))
+                        }
+                        onBookmarksChange={(nextBm) =>
+                          updateLocalNote(splitNote.id, (n) => ({ ...n, bookmarks: nextBm }))
+                        }
+                        onCursorChange={(stats) => {
+                          if (focusedPane === "split") setCursorStats(stats);
+                        }}
+                        onFocusPane={() => setFocusedPane("split")}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </main>
+        </div>
+      </div>
 
       {/* Bottom Notepad++ Status Bar */}
       <footer className="h-7 px-3 bg-[#131820] border-t border-[#21262d] flex items-center justify-between gap-3 text-[11px] font-mono text-[#8b949e] shrink-0 select-none overflow-x-auto">
         <div className="flex items-center gap-3 shrink-0">
-          {/* Language Selector */}
-          {focusedTab ? (
+          {focusedNote ? (
             <select
-              value={focusedTab.language}
+              value={focusedNote.language}
               onChange={(e) =>
-                updateTabById(focusedTab.id, (t) => ({
-                  ...t,
+                updateLocalNote(focusedNote.id, (n) => ({
+                  ...n,
                   language: e.target.value as LanguageMode,
                 }))
               }
@@ -1412,17 +1770,19 @@ export default function VaultWorkspace({ room }: { room: string }) {
             </select>
           ) : null}
 
-          <button
-            type="button"
-            onClick={() => {
-              setGoToLineInput(String(cursorStats.line));
-              setGoToLineOpen(true);
-            }}
-            title="Go to Line / Bookmarks (Cmd/Ctrl+G)"
-            className="hover:text-white cursor-pointer"
-          >
-            Ln {cursorStats.line.toLocaleString()}, Col {cursorStats.col}
-          </button>
+          {focusedNote ? (
+            <button
+              type="button"
+              onClick={() => {
+                setGoToLineInput(String(cursorStats.line));
+                setGoToLineOpen(true);
+              }}
+              title="Go to Line / Bookmarks (Cmd/Ctrl+G)"
+              className="hover:text-white cursor-pointer"
+            >
+              Ln {cursorStats.line.toLocaleString()}, Col {cursorStats.col}
+            </button>
+          ) : null}
 
           {cursorStats.selChars > 0 ? (
             <span className="text-sky-400">
@@ -1430,7 +1790,7 @@ export default function VaultWorkspace({ room }: { room: string }) {
             </span>
           ) : null}
 
-          {focusedTab && focusedTab.bookmarks.length > 0 ? (
+          {focusedNote && focusedNote.bookmarks.length > 0 ? (
             <button
               type="button"
               onClick={() => getFocusedEditor()?.jumpToNextBookmark()}
@@ -1438,47 +1798,43 @@ export default function VaultWorkspace({ room }: { room: string }) {
               className="inline-flex items-center gap-1 text-amber-400 hover:text-amber-300 cursor-pointer"
             >
               <Bookmark className="w-3 h-3 fill-amber-400" />
-              <span>{focusedTab.bookmarks.length}</span>
+              <span>{focusedNote.bookmarks.length}</span>
             </button>
           ) : null}
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
-          <span>
-            {activeStats.lines.toLocaleString()} lines • {activeStats.words.toLocaleString()} words •{" "}
-            {formatBytes(activeStats.bytes)}
-          </span>
-
-          {focusedTab ? (
-            <button
-              type="button"
-              onClick={() =>
-                updateTabById(focusedTab.id, (t) => ({ ...t, wordWrap: !t.wordWrap }))
-              }
-              title="Toggle Word Wrap"
-              className={`inline-flex items-center gap-1 cursor-pointer ${
-                focusedTab.wordWrap ? "text-white" : "text-[#6e7681]"
-              }`}
-            >
-              <WrapText className="w-3 h-3" />
-              <span>{focusedTab.wordWrap ? "Wrap" : "NoWrap"}</span>
-            </button>
+          {focusedNote ? (
+            <>
+              <span>
+                {activeStats.lines.toLocaleString()} lines • {activeStats.words.toLocaleString()}{" "}
+                words • {formatBytes(activeStats.bytes)}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  updateLocalNote(focusedNote.id, (n) => ({ ...n, wordWrap: !n.wordWrap }))
+                }
+                title="Toggle Word Wrap"
+                className={`inline-flex items-center gap-1 cursor-pointer ${
+                  focusedNote.wordWrap ? "text-white" : "text-[#6e7681]"
+                }`}
+              >
+                <WrapText className="w-3 h-3" />
+                <span>{focusedNote.wordWrap ? "Wrap" : "NoWrap"}</span>
+              </button>
+              <span className="hidden sm:inline text-[#6e7681]">v{focusedNote.version}</span>
+            </>
           ) : null}
 
           <span className="hidden md:inline text-[#6e7681]">
-            AES-256-GCM {storageBackend === "local-fs" ? "• Local" : "• Blob"}
+            AES-256-GCM • {dbBackend === "turso" ? "Turso" : "Local SQLite"}
           </span>
-
-          {lastSavedAt ? (
-            <span className="hidden sm:inline text-[#6e7681]">
-              Saved {new Date(lastSavedAt).toLocaleTimeString()}
-            </span>
-          ) : null}
         </div>
       </footer>
 
       {/* Go To Line + Bookmarks Quick Modal */}
-      {goToLineOpen && focusedTab ? (
+      {goToLineOpen && focusedNote ? (
         <div
           className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-start justify-center pt-24 p-4"
           onClick={() => setGoToLineOpen(false)}
@@ -1523,16 +1879,16 @@ export default function VaultWorkspace({ room }: { room: string }) {
               </div>
             </form>
 
-            {focusedTab.bookmarks.length > 0 ? (
+            {focusedNote.bookmarks.length > 0 ? (
               <div className="pt-2 border-t border-[#262e3a] space-y-1.5">
                 <div className="text-[11px] font-semibold text-amber-400 flex items-center gap-1">
                   <Bookmark className="w-3 h-3 fill-amber-400" />
                   Bookmarked Lines
                 </div>
                 <div className="max-h-40 overflow-y-auto space-y-1">
-                  {focusedTab.bookmarks.map((ln) => {
+                  {focusedNote.bookmarks.map((ln) => {
                     const preview =
-                      focusedTab.content.split("\n")[ln - 1]?.trim().slice(0, 50) || "(empty)";
+                      focusedNote.content.split("\n")[ln - 1]?.trim().slice(0, 50) || "(empty)";
                     return (
                       <button
                         key={ln}
@@ -1558,36 +1914,37 @@ export default function VaultWorkspace({ room }: { room: string }) {
       {/* Boolean Block Scanner Modal */}
       <ScannerModal
         open={scannerOpen}
-        tabs={vault.tabs}
-        activeTabId={activeTab.id}
+        allNotes={notes}
+        openNoteIds={openTabIds}
+        activeNoteId={focusedNote?.id ?? null}
         onJumpToMatch={handleJumpToScannerMatch}
-        onExportMatchesToTab={(title, content) => {
-          handleAddTab(title, content, "plain");
-          showToast(`Opened matching results in "${title}"`, "success");
+        onExportMatchesToNote={(title, content) => {
+          void createNoteOnServer(title, content, "", "plain").then((created) => {
+            if (created) showToast(`Created "${title}" with search results`, "success");
+          });
         }}
         onClose={() => setScannerOpen(false)}
       />
 
-      {/* Revision History Drawer */}
+      {/* Per-Note Revision History Drawer */}
       <HistoryDrawer
         open={historyOpen}
-        room={normalizedRoom}
-        password={activePassword}
-        onRestoreVault={(restored) => {
-          setVault(restored);
-          showToast("Restored backup into workspace — press ⌘S to save", "info");
+        noteId={focusedNote?.id ?? null}
+        noteTitle={focusedNote?.title ?? ""}
+        encryptionKey={encryptionKey}
+        onRestoreIntoActive={(restoredContent) => {
+          getFocusedEditor()?.replaceFullDocument(restoredContent);
+          showToast("Restored revision into editor — press ⌘S to save", "info");
         }}
-        onImportTab={(tab) => {
-          const copy: NoteTab = {
-            ...tab,
-            id: generateTabId(),
-            title: `${tab.title} (restored)`,
-            updatedAt: Date.now(),
-          };
-          setVault((prev) =>
-            prev ? { ...prev, activeTabId: copy.id, tabs: [...prev.tabs, copy] } : prev
-          );
-          showToast(`Opened "${copy.title}"`, "success");
+        onCreateCopyFromRevision={(meta, content, ver) => {
+          void createNoteOnServer(
+            `${meta.title} (v${ver})`,
+            content,
+            meta.folder,
+            meta.language
+          ).then((created) => {
+            if (created) showToast(`Opened v${ver} as a new note`, "success");
+          });
         }}
         onClose={() => setHistoryOpen(false)}
       />
@@ -1595,33 +1952,13 @@ export default function VaultWorkspace({ room }: { room: string }) {
       {/* Settings & Security Modal */}
       <SettingsModal
         open={settingsOpen}
-        room={normalizedRoom}
+        username={user.username}
         settings={settings}
         onUpdateSettings={handleUpdateSettings}
-        onChangePassword={async (nextPwd) => {
-          if (!vault) return;
-          await saveVaultNow(vault, nextPwd);
-          setActivePassword(nextPwd);
-          saveRoomPassword(normalizedRoom, nextPwd, settings.sessionTtlMinutes);
-        }}
-        onLockNow={() => {
-          clearRoomPassword(normalizedRoom);
-          setActivePassword("");
-          setVault(null);
-          setSavedVaultSnapshot(null);
-          setPhase("unlock");
-        }}
-        onDeleteRoom={async () => {
-          const res = await fetch(`/api/vault/${encodeURIComponent(normalizedRoom)}`, {
-            method: "DELETE",
-          });
-          if (!res.ok) {
-            showToast("Failed to delete vault", "error");
-            return;
-          }
-          clearRoomPassword(normalizedRoom);
-          router.push("/");
-        }}
+        onChangePassword={handleChangeMasterPassword}
+        onLockNow={handleLockNow}
+        onSignOut={handleSignOut}
+        onDeleteAccount={handleDeleteAccount}
         onClose={() => setSettingsOpen(false)}
       />
 

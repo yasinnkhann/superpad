@@ -1,14 +1,19 @@
-import { VaultData, normalizeVaultData } from "@/types/vault";
+import {
+  EncryptedNoteDTO,
+  NoteMetadata,
+  NoteRecord,
+  normalizeNoteMetadata,
+} from "@/types/vault";
 
-// Magic 4-byte header identifying ZeroPad v2 (200,000 PBKDF2-SHA-256 rounds)
-const MAGIC_V2 = new Uint8Array([0x5a, 0x50, 0x30, 0x32]); // "ZP02"
-const PBKDF2_ITERATIONS_V2 = 200_000;
-const PBKDF2_ITERATIONS_LEGACY = 100_000;
+// Split-key PBKDF2 derivation:
+// 200,000 PBKDF2-SHA-256 rounds → 512 bits (64 bytes):
+//   bytes [0..31]  -> authKey (sent to server for login verification only)
+//   bytes [32..63] -> encryptionKey (AES-256-GCM key, NEVER sent to server)
+const PBKDF2_ITERATIONS = 200_000;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 
-function bytesToBase64(bytes: Uint8Array): string {
-  // Chunk conversion to prevent call-stack overflow on large files (>100KB)
+export function bytesToBase64(bytes: Uint8Array): string {
   const chunkSize = 0x8000;
   const parts: string[] = [];
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -18,7 +23,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(parts.join(""));
 }
 
-function base64ToBytes(base64: string): Uint8Array {
+export function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
@@ -27,39 +32,75 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
-function hasMagicV2(bytes: Uint8Array): boolean {
-  if (bytes.length < MAGIC_V2.length + SALT_BYTES + IV_BYTES + 16) {
-    return false;
-  }
-  for (let i = 0; i < MAGIC_V2.length; i++) {
-    if (bytes[i] !== MAGIC_V2[i]) return false;
-  }
-  return true;
+export function generateSaltBase64(): string {
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  return bytesToBase64(salt);
 }
 
-async function deriveAesKey(
+export interface DerivedUserKeys {
+  authKey: string;
+  encryptionKey: CryptoKey;
+  serializedKey: string;
+}
+
+/**
+ * Derives two cryptographically independent 256-bit keys from (password, kdfSalt).
+ * Even if the server's authKey database is completely compromised, encryptionKey
+ * cannot be derived from authKey.
+ */
+export async function deriveUserKeys(
   password: string,
-  salt: Uint8Array,
-  iterations: number
-): Promise<CryptoKey> {
+  kdfSaltBase64: string
+): Promise<DerivedUserKeys> {
   const subtle = globalThis.crypto.subtle;
+  const saltBytes = new Uint8Array(base64ToBytes(kdfSaltBase64));
+
   const keyMaterial = await subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
     "PBKDF2",
     false,
-    ["deriveKey"]
+    ["deriveBits"]
   );
-  // Copy into a plain ArrayBuffer-backed Uint8Array for strict BufferSource typing
-  const saltBuffer = new Uint8Array(salt);
-  return subtle.deriveKey(
+
+  const derivedBits = await subtle.deriveBits(
     {
       name: "PBKDF2",
-      salt: saltBuffer,
-      iterations,
+      salt: saltBytes,
+      iterations: PBKDF2_ITERATIONS,
       hash: "SHA-256",
     },
     keyMaterial,
+    512
+  );
+
+  const allBytes = new Uint8Array(derivedBits);
+  const authBytes = allBytes.slice(0, 32);
+  const encBytes = allBytes.slice(32, 64);
+
+  const encryptionKey = await subtle.importKey(
+    "raw",
+    new Uint8Array(encBytes),
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+
+  return {
+    authKey: bytesToBase64(authBytes),
+    encryptionKey,
+    serializedKey: bytesToBase64(encBytes),
+  };
+}
+
+export async function importRawEncryptionKey(serializedKey: string): Promise<CryptoKey> {
+  const rawBytes = new Uint8Array(base64ToBytes(serializedKey));
+  if (rawBytes.length !== 32) {
+    throw new Error("Invalid cached encryption key length");
+  }
+  return globalThis.crypto.subtle.importKey(
+    "raw",
+    rawBytes,
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"]
@@ -67,144 +108,149 @@ async function deriveAesKey(
 }
 
 /**
- * Encrypts UTF-8 plaintext into a base64 AES-256-GCM envelope.
- * Format: MAGIC("ZP02", 4B) + SALT(16B) + IV(12B) + CIPHERTEXT_WITH_GCM_TAG
+ * Fast AES-256-GCM encryption using an already-derived CryptoKey.
+ * Format: IV(12B) + CIPHERTEXT_WITH_GCM_TAG, base64 encoded.
  */
-export async function encryptText(plaintext: string, password: string): Promise<string> {
-  const salt = globalThis.crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+export async function encryptWithKey(plaintext: string, key: CryptoKey): Promise<string> {
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const key = await deriveAesKey(password, salt, PBKDF2_ITERATIONS_V2);
-
-  const encryptedBuffer = await globalThis.crypto.subtle.encrypt(
+  const encryptedBuf = await globalThis.crypto.subtle.encrypt(
     { name: "AES-GCM", iv: new Uint8Array(iv) },
     key,
     new TextEncoder().encode(plaintext)
   );
-
-  const cipherBytes = new Uint8Array(encryptedBuffer);
-  const combined = new Uint8Array(
-    MAGIC_V2.length + SALT_BYTES + IV_BYTES + cipherBytes.length
-  );
-  combined.set(MAGIC_V2, 0);
-  combined.set(salt, MAGIC_V2.length);
-  combined.set(iv, MAGIC_V2.length + SALT_BYTES);
-  combined.set(cipherBytes, MAGIC_V2.length + SALT_BYTES + IV_BYTES);
-
+  const ctBytes = new Uint8Array(encryptedBuf);
+  const combined = new Uint8Array(IV_BYTES + ctBytes.length);
+  combined.set(iv, 0);
+  combined.set(ctBytes, IV_BYTES);
   return bytesToBase64(combined);
 }
 
-/**
- * Decrypts a ZeroPad v2 envelope or legacy raw (salt + iv + ct, 100k rounds) payload.
- */
-export async function decryptText(base64Payload: string, password: string): Promise<string> {
+export async function decryptWithKey(base64Payload: string, key: CryptoKey): Promise<string> {
   const bytes = base64ToBytes(base64Payload);
-
-  let salt: Uint8Array;
-  let iv: Uint8Array;
-  let ciphertext: Uint8Array;
-  let iterations: number;
-
-  if (hasMagicV2(bytes)) {
-    const offset = MAGIC_V2.length;
-    salt = bytes.slice(offset, offset + SALT_BYTES);
-    iv = bytes.slice(offset + SALT_BYTES, offset + SALT_BYTES + IV_BYTES);
-    ciphertext = bytes.slice(offset + SALT_BYTES + IV_BYTES);
-    iterations = PBKDF2_ITERATIONS_V2;
-  } else {
-    if (bytes.length < SALT_BYTES + IV_BYTES + 16) {
-      throw new Error("Invalid encrypted payload");
-    }
-    salt = bytes.slice(0, SALT_BYTES);
-    iv = bytes.slice(SALT_BYTES, SALT_BYTES + IV_BYTES);
-    ciphertext = bytes.slice(SALT_BYTES + IV_BYTES);
-    iterations = PBKDF2_ITERATIONS_LEGACY;
+  if (bytes.length < IV_BYTES + 16) {
+    throw new Error("Corrupted ciphertext");
   }
-
-  const key = await deriveAesKey(password, salt, iterations);
-  const decryptedBuffer = await globalThis.crypto.subtle.decrypt(
+  const iv = bytes.slice(0, IV_BYTES);
+  const ct = bytes.slice(IV_BYTES);
+  const decryptedBuf = await globalThis.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: new Uint8Array(iv) },
     key,
-    new Uint8Array(ciphertext)
+    new Uint8Array(ct)
   );
-
-  return new TextDecoder().decode(decryptedBuffer);
+  return new TextDecoder().decode(decryptedBuf);
 }
 
-export async function encryptVault(vault: VaultData, password: string): Promise<string> {
-  const payload: VaultData = {
-    ...vault,
-    version: 1,
-    updatedAt: Date.now(),
-  };
-  return encryptText(JSON.stringify(payload), password);
+export async function encryptNotePayload(
+  meta: NoteMetadata,
+  content: string,
+  key: CryptoKey
+): Promise<{ encryptedMeta: string; encryptedContent: string; sizeBytes: number }> {
+  const [encryptedMeta, encryptedContent] = await Promise.all([
+    encryptWithKey(JSON.stringify(meta), key),
+    encryptWithKey(content, key),
+  ]);
+  const sizeBytes = new TextEncoder().encode(content).length;
+  return { encryptedMeta, encryptedContent, sizeBytes };
 }
 
-export async function decryptVault(base64Payload: string, password: string): Promise<VaultData> {
-  const plaintext = await decryptText(base64Payload, password);
+export async function decryptNoteDTO(
+  dto: EncryptedNoteDTO,
+  key: CryptoKey
+): Promise<NoteRecord> {
+  const [metaJson, content] = await Promise.all([
+    decryptWithKey(dto.encryptedMeta, key),
+    decryptWithKey(dto.encryptedContent, key),
+  ]);
+  let parsedMeta: unknown = null;
   try {
-    const parsed = JSON.parse(plaintext);
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.tabs)) {
-      return normalizeVaultData(parsed);
-    }
+    parsedMeta = JSON.parse(metaJson);
   } catch {
-    // Plain-text legacy note (e.g., imported from private-notepad)
+    parsedMeta = null;
   }
-  return normalizeVaultData(plaintext);
+  const meta = normalizeNoteMetadata(parsedMeta);
+  return {
+    id: dto.id,
+    ...meta,
+    content,
+    version: dto.version,
+    sizeBytes: dto.sizeBytes,
+    createdAt: dto.createdAt,
+    updatedAt: dto.updatedAt,
+  };
 }
 
-// Versioned browser session cache (per room)
-const SESSION_PREFIX = "zeropad:v1:session:";
-const SETTINGS_KEY = "zeropad:v1:settings";
-const RECENT_ROOMS_KEY = "zeropad:v1:recent_rooms";
+// ==========================================
+// Versioned Local Key Cache & UI Settings
+// ==========================================
 
-interface StoredSession {
-  password: string;
+const KEY_CACHE_PREFIX = "zeropad:v2:key:";
+const SETTINGS_KEY = "zeropad:v2:settings";
+
+interface CachedKeyPayload {
+  serializedKey: string;
   expiresAt: number;
 }
 
-export function getSavedRoomPassword(room: string): string | null {
+export async function getCachedUserKey(userId: string): Promise<{
+  key: CryptoKey;
+  serializedKey: string;
+} | null> {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(`${SESSION_PREFIX}${room}`);
+    const raw = window.localStorage.getItem(`${KEY_CACHE_PREFIX}${userId}`);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredSession;
-    if (!parsed.password || typeof parsed.expiresAt !== "number") {
-      window.localStorage.removeItem(`${SESSION_PREFIX}${room}`);
+    const parsed = JSON.parse(raw) as CachedKeyPayload;
+    if (!parsed.serializedKey || typeof parsed.expiresAt !== "number") {
+      window.localStorage.removeItem(`${KEY_CACHE_PREFIX}${userId}`);
       return null;
     }
     if (Date.now() > parsed.expiresAt) {
-      window.localStorage.removeItem(`${SESSION_PREFIX}${room}`);
+      window.localStorage.removeItem(`${KEY_CACHE_PREFIX}${userId}`);
       return null;
     }
-    return parsed.password;
+    const key = await importRawEncryptionKey(parsed.serializedKey);
+    return { key, serializedKey: parsed.serializedKey };
   } catch {
     return null;
   }
 }
 
-export function saveRoomPassword(room: string, password: string, ttlMinutes: number): void {
+export function saveCachedUserKey(
+  userId: string,
+  serializedKey: string,
+  ttlMinutes: number
+): void {
   if (typeof window === "undefined") return;
   try {
     if (ttlMinutes <= 0) {
-      window.localStorage.removeItem(`${SESSION_PREFIX}${room}`);
+      window.localStorage.removeItem(`${KEY_CACHE_PREFIX}${userId}`);
       return;
     }
-    const payload: StoredSession = {
-      password,
+    const payload: CachedKeyPayload = {
+      serializedKey,
       expiresAt: Date.now() + ttlMinutes * 60 * 1000,
     };
-    window.localStorage.setItem(`${SESSION_PREFIX}${room}`, JSON.stringify(payload));
+    window.localStorage.setItem(`${KEY_CACHE_PREFIX}${userId}`, JSON.stringify(payload));
   } catch {
-    // Ignore quota / privacy mode errors
+    // Ignore storage quota / privacy mode errors
   }
 }
 
-export function clearRoomPassword(room: string): void {
+export function clearCachedUserKey(userId?: string): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.removeItem(`${SESSION_PREFIX}${room}`);
+    if (userId) {
+      window.localStorage.removeItem(`${KEY_CACHE_PREFIX}${userId}`);
+      return;
+    }
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(KEY_CACHE_PREFIX)) keysToRemove.push(k);
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
   } catch {
-    // Ignore storage errors
+    // Ignore
   }
 }
 
@@ -224,39 +270,6 @@ export function saveStoredSettings<T>(settings: T): void {
   try {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   } catch {
-    // Ignore storage errors
-  }
-}
-
-export function getRecentRooms(): string[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(RECENT_ROOMS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-export function recordRecentRoom(room: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    const existing = getRecentRooms().filter((r) => r !== room);
-    const updated = [room, ...existing].slice(0, 8);
-    window.localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(updated));
-  } catch {
-    // Ignore storage errors
-  }
-}
-
-export function removeRecentRoom(room: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    const updated = getRecentRooms().filter((r) => r !== room);
-    window.localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(updated));
-  } catch {
-    // Ignore storage errors
+    // Ignore
   }
 }

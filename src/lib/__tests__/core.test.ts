@@ -3,10 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  decryptText,
-  decryptVault,
-  encryptText,
-  encryptVault,
+  decryptNoteDTO,
+  decryptWithKey,
+  deriveUserKeys,
+  encryptNotePayload,
+  encryptWithKey,
+  generateSaltBase64,
+  importRawEncryptionKey,
 } from "@/lib/crypto";
 import {
   deduplicateLines,
@@ -18,80 +21,78 @@ import {
   trimTrailingWhitespace,
 } from "@/lib/scanner";
 import {
-  deleteVault,
-  listVaultHistory,
-  readVault,
-  readVaultRevision,
-  validateCiphertext,
-  validateRoomSlug,
-  writeVault,
-} from "@/lib/storage";
-import { createDefaultVault, createNewTab } from "@/types/vault";
+  createSession,
+  generateDecoySalt,
+  getAuthenticatedUserFromToken,
+  hashAuthKey,
+  revokeSessionByToken,
+  validateUsername,
+  verifyAuthKey,
+} from "@/lib/auth";
+import { getDb, resetDbClientForTests } from "@/lib/db";
+import type { NoteRecord } from "@/types/vault";
 
-describe("ZeroPad Crypto Engine", () => {
-  it("encrypts and decrypts a multi-tab vault round-trip", async () => {
-    const vault = createDefaultVault("introspects.txt", "Line 1\n\nLine 2");
-    vault.tabs.push(createNewTab("script.py", "print('hello')", "python"));
+describe("ZeroPad Split-Key Crypto Engine", () => {
+  it("derives independent authKey and encryptionKey from password + salt", async () => {
+    const salt = generateSaltBase64();
+    const keysA = await deriveUserKeys("my-strong-password", salt);
+    const keysB = await deriveUserKeys("my-strong-password", salt);
+    const keysWrong = await deriveUserKeys("different-password", salt);
 
-    const ciphertext = await encryptVault(vault, "s3cr3t-p@ss");
-    expect(ciphertext).not.toContain("introspects");
-    expect(ciphertext).not.toContain("print");
-
-    const restored = await decryptVault(ciphertext, "s3cr3t-p@ss");
-    expect(restored.tabs).toHaveLength(2);
-    expect(restored.tabs[0].title).toBe("introspects.txt");
-    expect(restored.tabs[0].content).toBe("Line 1\n\nLine 2");
-    expect(restored.tabs[1].language).toBe("python");
+    expect(keysA.authKey).toBe(keysB.authKey);
+    expect(keysA.serializedKey).toBe(keysB.serializedKey);
+    expect(keysA.authKey).not.toBe(keysA.serializedKey);
+    expect(keysA.authKey).not.toBe(keysWrong.authKey);
   });
 
-  it("rejects wrong passwords cleanly", async () => {
-    const ciphertext = await encryptText("top secret payload", "correct-horse");
-    await expect(decryptText(ciphertext, "wrong-password")).rejects.toThrow();
+  it("encrypts and decrypts note metadata + content (including >500KB payloads)", async () => {
+    const salt = generateSaltBase64();
+    const derived = await deriveUserKeys("vault-secret-123", salt);
+
+    const bigBody = "ZeroPad line entry https://example.com\n".repeat(13_000);
+    expect(bigBody.length).toBeGreaterThan(500_000);
+
+    const enc = await encryptNotePayload(
+      {
+        title: "introspects.txt",
+        folder: "Personal",
+        language: "plain",
+        wordWrap: true,
+        bookmarks: [3, 42],
+        pinned: true,
+      },
+      bigBody,
+      derived.encryptionKey
+    );
+
+    expect(enc.encryptedMeta).not.toContain("introspects");
+    expect(enc.encryptedContent).not.toContain("ZeroPad");
+
+    const reimported = await importRawEncryptionKey(derived.serializedKey);
+    const decrypted = await decryptNoteDTO(
+      {
+        id: "note-1",
+        ...enc,
+        version: 1,
+        createdAt: 1000,
+        updatedAt: 2000,
+      },
+      reimported
+    );
+
+    expect(decrypted.title).toBe("introspects.txt");
+    expect(decrypted.folder).toBe("Personal");
+    expect(decrypted.bookmarks).toEqual([3, 42]);
+    expect(decrypted.pinned).toBe(true);
+    expect(decrypted.content).toBe(bigBody);
   });
 
-  it("handles large payloads (>500KB) without call-stack overflow", async () => {
-    const largeText = "ZeroPad encrypted line entry https://example.com\n".repeat(12_000);
-    expect(largeText.length).toBeGreaterThan(500_000);
-
-    const vault = createDefaultVault("big.txt", largeText);
-    const ciphertext = await encryptVault(vault, "large-vault-pass");
-    const restored = await decryptVault(ciphertext, "large-vault-pass");
-    expect(restored.tabs[0].content).toBe(largeText);
-  });
-
-  it("decrypts legacy raw plain-text blobs (100k PBKDF2 rounds, no magic header)", async () => {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const keyMat = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode("legacy-pass"),
-      "PBKDF2",
-      false,
-      ["deriveKey"]
-    );
-    const key = await crypto.subtle.deriveKey(
-      { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
-      keyMat,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt"]
-    );
-    const ct = new Uint8Array(
-      await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv },
-        key,
-        new TextEncoder().encode("Legacy note body line 1\nLine 2")
-      )
-    );
-    const combined = new Uint8Array(16 + 12 + ct.length);
-    combined.set(salt, 0);
-    combined.set(iv, 16);
-    combined.set(ct, 28);
-    const b64 = Buffer.from(combined).toString("base64");
-
-    const vault = await decryptVault(b64, "legacy-pass");
-    expect(vault.tabs).toHaveLength(1);
-    expect(vault.tabs[0].content).toBe("Legacy note body line 1\nLine 2");
+  it("rejects decryption with a wrong key", async () => {
+    const salt = generateSaltBase64();
+    const k1 = await deriveUserKeys("password-one", salt);
+    const k2 = await deriveUserKeys("password-two", salt);
+    const ct = await encryptWithKey("secret text", k1.encryptionKey);
+    await expect(decryptWithKey(ct, k2.encryptionKey)).rejects.toThrow();
   });
 });
 
@@ -107,7 +108,22 @@ describe("Boolean Block Scanner & Text Transforms", () => {
     "Gamma only block",
   ].join("\n");
 
-  it("tracks accurate offsets and 1-based line numbers for blocks", () => {
+  const makeNote = (id: string, title: string, folder: string, content: string): NoteRecord => ({
+    id,
+    title,
+    folder,
+    content,
+    language: "plain",
+    wordWrap: true,
+    bookmarks: [],
+    pinned: false,
+    version: 1,
+    sizeBytes: content.length,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  it("tracks accurate offsets and 1-based line numbers", () => {
     const blocks = extractParagraphBlocks(sampleA);
     expect(blocks).toHaveLength(4);
     expect(blocks[0].lineNumber).toBe(1);
@@ -117,31 +133,37 @@ describe("Boolean Block Scanner & Text Transforms", () => {
     expect(sampleA.slice(blocks[1].startOffset, blocks[1].endOffset)).toBe(blocks[1].content);
   });
 
-  it("matches AND, OR, and NOT criteria across single and all tabs", () => {
-    const tab1 = createNewTab("notes.txt", sampleA);
-    const tab2 = createNewTab("second.txt", "Alpha Beta Delta\n\nUnrelated block");
+  it("scans current tab, open tabs, and all account notes with AND / OR / NOT", () => {
+    const n1 = makeNote("n1", "notes.txt", "Personal", sampleA);
+    const n2 = makeNote("n2", "work.txt", "Work", "Alpha Beta Delta\n\nOther block");
+    const n3 = makeNote("n3", "archive.txt", "Archive", "Alpha Beta Delta Closed");
 
-    const res1 = runBooleanScanner([tab1, tab2], tab1.id, {
+    const cur = runBooleanScanner([n1, n2, n3], ["n1", "n2"], "n1", {
       all: "alpha, beta",
       any: "",
       exclude: "draft",
       scope: "current",
     });
-    expect(res1.matches).toHaveLength(2);
-    expect(res1.matches[0].lineNumber).toBe(1);
-    expect(res1.matches[1].lineNumber).toBe(3);
+    expect(cur.matches).toHaveLength(2);
 
-    const resAll = runBooleanScanner([tab1, tab2], tab1.id, {
+    const openOnly = runBooleanScanner([n1, n2, n3], ["n1", "n2"], "n1", {
       all: "alpha, beta",
       any: "delta, multi-line",
       exclude: "",
+      scope: "open",
+    });
+    expect(openOnly.matches.map((m) => m.noteId)).toEqual(["n1", "n2"]);
+
+    const allAccount = runBooleanScanner([n1, n2, n3], ["n1"], "n1", {
+      all: "alpha, beta, delta",
+      any: "",
+      exclude: "",
       scope: "all",
     });
-    expect(resAll.matches).toHaveLength(2);
-    expect(resAll.matches.map((m) => m.tabTitle)).toEqual(["notes.txt", "second.txt"]);
+    expect(allAccount.matches.map((m) => m.noteId)).toEqual(["n2", "n3"]);
   });
 
-  it("runs Notepad++ line & JSON text transformations cleanly", () => {
+  it("runs Notepad++ line & JSON transforms cleanly", () => {
     expect(sortLines("b\na\nc", "asc")).toBe("a\nb\nc");
     expect(sortLines("b\na\nc", "desc")).toBe("c\nb\na");
     expect(deduplicateLines("a\nb\na\nc\nb")).toEqual({ result: "a\nb\nc", removed: 2 });
@@ -157,59 +179,63 @@ describe("Boolean Block Scanner & Text Transforms", () => {
   });
 });
 
-describe("Encrypted Vault Storage (Local Backend)", () => {
+describe("Turso / libSQL Schema & Server Auth", () => {
   let tmpDir: string;
 
   beforeAll(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zeropad-test-"));
-    process.env.ZEROPAD_LOCAL_DATA_DIR = tmpDir;
-    delete process.env.BLOB_READ_WRITE_TOKEN;
-    delete process.env.ZEROPAD_BLOB_READ_WRITE_TOKEN;
+    resetDbClientForTests();
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zeropad-turso-test-"));
+    process.env.ZEROPAD_DB_URL = `file:${path.join(tmpDir, "test.db")}`;
+    delete process.env.TURSO_DATABASE_URL;
+    delete process.env.TURSO_AUTH_TOKEN;
   });
 
   afterAll(async () => {
-    delete process.env.ZEROPAD_LOCAL_DATA_DIR;
+    resetDbClientForTests();
+    delete process.env.ZEROPAD_DB_URL;
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("validates room slugs and base64 ciphertext", () => {
-    expect(validateRoomSlug("My-Vault_01")).toBe("my-vault_01");
-    expect(() => validateRoomSlug("../etc/passwd")).toThrow();
-    expect(() => validateCiphertext("not valid base64!!")).toThrow();
+  it("validates usernames, decoy salts, and scrypt auth verifiers", () => {
+    expect(validateUsername("Cobalt_Vault-99")).toBe("cobalt_vault-99");
+    expect(() => validateUsername("ab")).toThrow();
+    expect(() => validateUsername("bad user!")).toThrow();
+
+    expect(generateDecoySalt("ghost-user")).toBe(generateDecoySalt("ghost-user"));
+    expect(generateDecoySalt("ghost-user")).not.toBe(generateDecoySalt("other-user"));
+
+    const { salt, verifier } = hashAuthKey("base64-auth-key-example");
+    expect(verifyAuthKey("base64-auth-key-example", salt, verifier)).toBe(true);
+    expect(verifyAuthKey("wrong-auth-key", salt, verifier)).toBe(false);
   });
 
-  it("writes, hashes room paths, keeps last 10 rolling backups, and deletes cleanly", async () => {
-    const room = "secret-test-room";
-    const empty = await readVault(room);
-    expect(empty.exists).toBe(false);
+  it("creates users, enforces UNIQUE usernames, manages sessions, and cascades deletes", async () => {
+    const db = await getDb();
+    const now = Date.now();
+    const { salt, verifier } = hashAuthKey("test-auth-key-12345");
 
-    // Perform 12 saves and ensure only the latest 10 revisions remain
-    let lastCipher = "";
-    for (let i = 0; i < 12; i++) {
-      lastCipher = Buffer.from(`encrypted-blob-payload-number-${i}-padding-1234567890`).toString(
-        "base64"
-      );
-      await writeVault(room, lastCipher);
-      // Small delay so timestamp revision IDs are distinct
-      await new Promise((r) => setTimeout(r, 5));
-    }
+    await db.execute({
+      sql: `INSERT INTO users (id, username, kdf_salt, auth_salt, auth_verifier, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: ["u-1", "alice", generateSaltBase64(), salt, verifier, now, now],
+    });
 
-    // Raw room name must not appear as a directory name on disk
-    const vaultDirs = await fs.readdir(path.join(tmpDir, "vaults"));
-    expect(vaultDirs.some((d) => d.includes("secret-test-room"))).toBe(false);
+    // Duplicate username must fail UNIQUE constraint
+    await expect(
+      db.execute({
+        sql: `INSERT INTO users (id, username, kdf_salt, auth_salt, auth_verifier, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: ["u-2", "alice", generateSaltBase64(), salt, verifier, now, now],
+      })
+    ).rejects.toThrow();
 
-    const current = await readVault(room);
-    expect(current.exists).toBe(true);
-    expect(current.ciphertext).toBe(lastCipher);
+    // Session create -> authenticate -> revoke
+    const session = await createSession("u-1");
+    const authed = await getAuthenticatedUserFromToken(session.token);
+    expect(authed?.username).toBe("alice");
 
-    const history = await listVaultHistory(room);
-    expect(history).toHaveLength(10);
-
-    const oldestKept = await readVaultRevision(room, history[history.length - 1].id);
-    expect(oldestKept.exists).toBe(true);
-
-    await deleteVault(room);
-    const afterDelete = await readVault(room);
-    expect(afterDelete.exists).toBe(false);
+    await revokeSessionByToken(session.token);
+    const afterRevoke = await getAuthenticatedUserFromToken(session.token);
+    expect(afterRevoke).toBeNull();
   });
 });
