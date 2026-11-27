@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "node --env-file=.env.local scripts/e2e-live-turso.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.6",
