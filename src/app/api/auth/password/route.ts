@@ -3,11 +3,14 @@ import { NextResponse } from "next/server";
 import { metric } from "@vercel/functions";
 import { getDb, getDbBackend } from "@/lib/db";
 import {
+  attachSessionCookie,
+  createSession,
   getAuthenticatedUser,
   hashAuthKey,
   validateBase64String,
   verifyAuthKey,
 } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +29,15 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser();
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const rateCheck = await checkRateLimit(`pwd:user:${user.id}`, 6, 15 * 60 * 1000);
+    if (!rateCheck.allowed) {
+      metric("superpad.auth.password_change", 1, { outcome: "rate_limited", backend });
+      return NextResponse.json(
+        { error: `Too many password change attempts. Try again in ${rateCheck.retryAfterSeconds}s.` },
+        { status: 429, headers: { "Retry-After": String(rateCheck.retryAfterSeconds) } }
+      );
     }
 
     const body = (await request.json()) as {
@@ -57,13 +69,19 @@ export async function POST(request: Request) {
     const { salt: newAuthSalt, verifier: newVerifier } = hashAuthKey(newAuthKey);
     const now = Date.now();
 
-    // Atomic transaction: rotate credentials + update all notes encrypted under new key
+    // Atomic transaction: rotate credentials, revoke all existing sessions, and update all notes
     const tx = await db.transaction("write");
     try {
       await tx.execute({
         sql: `UPDATE users SET kdf_salt = ?, auth_salt = ?, auth_verifier = ?, updated_at = ?
               WHERE id = ?`,
         args: [newKdfSalt, newAuthSalt, newVerifier, now, user.id],
+      });
+
+      // Revoke every existing session across all devices on master password rotation
+      await tx.execute({
+        sql: `DELETE FROM sessions WHERE user_id = ?`,
+        args: [user.id],
       });
 
       // Clear old-key revisions that can no longer be decrypted under the new key
@@ -101,8 +119,17 @@ export async function POST(request: Request) {
       throw err;
     }
 
+    // Issue a brand-new session strictly for this device
+    const freshSession = await createSession(user.id);
+    const response = NextResponse.json({
+      success: true,
+      kdfSalt: newKdfSalt,
+      sessionsRevoked: true,
+    });
+    attachSessionCookie(response, freshSession.token, freshSession.expiresAt);
+
     metric("superpad.auth.password_change", 1, { outcome: "success", backend });
-    return NextResponse.json({ success: true, kdfSalt: newKdfSalt });
+    return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Password update failed";
     metric("superpad.auth.password_change", 1, { outcome: "error", backend });

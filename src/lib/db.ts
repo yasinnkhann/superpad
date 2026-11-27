@@ -28,14 +28,14 @@ function resolveDatabaseConfig(): { url: string; authToken?: string } {
       authToken: process.env.TURSO_AUTH_TOKEN,
     };
   }
-  const dataDir = path.join(process.cwd(), ".superpad-data");
-  fs.mkdirSync(dataDir, { recursive: true });
+  const localDir = path.join(process.cwd(), ".superpad-data");
+  fs.mkdirSync(localDir, { recursive: true });
   return {
-    url: `file:${path.join(dataDir, "superpad.db")}`,
+    url: `file:${path.join(localDir, "superpad.db")}`,
   };
 }
 
-export function getDbClient(): Client {
+function getDbClient(): Client {
   if (!cachedClient) {
     const cfg = resolveDatabaseConfig();
     cachedClient = createClient(cfg);
@@ -70,7 +70,8 @@ const SCHEMA_STATEMENTS = [
     version INTEGER NOT NULL DEFAULT 1,
     size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER DEFAULT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_notes_user_updated ON notes(user_id, updated_at DESC)`,
   `CREATE TABLE IF NOT EXISTS note_revisions (
@@ -84,7 +85,25 @@ const SCHEMA_STATEMENTS = [
     created_at INTEGER NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_revisions_note_ver ON note_revisions(note_id, version DESC)`,
+  `CREATE TABLE IF NOT EXISTS rate_limits (
+    key TEXT PRIMARY KEY,
+    count INTEGER NOT NULL,
+    reset_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at)`,
 ];
+
+async function runMigrations(client: Client): Promise<void> {
+  // Safely add deleted_at column to pre-existing notes tables (soft-trash support)
+  const info = await client.execute(`PRAGMA table_info(notes)`);
+  const hasDeletedAt = info.rows.some((r) => String(r.name) === "deleted_at");
+  if (!hasDeletedAt) {
+    await client.execute(`ALTER TABLE notes ADD COLUMN deleted_at INTEGER DEFAULT NULL`);
+  }
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_notes_user_deleted ON notes(user_id, deleted_at)`
+  );
+}
 
 export async function getDb(): Promise<Client> {
   const client = getDbClient();
@@ -93,6 +112,7 @@ export async function getDb(): Promise<Client> {
       for (const sql of SCHEMA_STATEMENTS) {
         await client.execute(sql);
       }
+      await runMigrations(client);
     })().catch((err) => {
       schemaInitPromise = null;
       throw err;

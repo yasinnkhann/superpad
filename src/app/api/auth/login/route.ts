@@ -8,14 +8,32 @@ import {
   validateUsername,
   verifyAuthKey,
 } from "@/lib/auth";
+import { checkRateLimit, clearRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
+
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const LOGIN_IP_LIMIT = 20;
+const LOGIN_USER_LIMIT = 8;
 
 export async function POST(request: Request) {
   const startedAt = performance.now();
   const backend = getDbBackend();
 
   try {
+    const ip = getClientIp(request);
+    const ipCheck = await checkRateLimit(`login:ip:${ip}`, LOGIN_IP_LIMIT, LOGIN_WINDOW_MS);
+    if (!ipCheck.allowed) {
+      metric("superpad.auth.login", 1, { outcome: "rate_limited", backend });
+      return NextResponse.json(
+        { error: `Too many login attempts. Try again in ${ipCheck.retryAfterSeconds}s.` },
+        {
+          status: 429,
+          headers: { "Retry-After": String(ipCheck.retryAfterSeconds) },
+        }
+      );
+    }
+
     const body = (await request.json()) as {
       username?: unknown;
       authKey?: unknown;
@@ -23,6 +41,19 @@ export async function POST(request: Request) {
 
     const username = validateUsername(body.username);
     const authKey = validateBase64String(body.authKey, "authKey", 32, 128);
+
+    const userKey = `login:user:${username}`;
+    const userCheck = await checkRateLimit(userKey, LOGIN_USER_LIMIT, LOGIN_WINDOW_MS);
+    if (!userCheck.allowed) {
+      metric("superpad.auth.login", 1, { outcome: "rate_limited", backend });
+      return NextResponse.json(
+        { error: `Too many failed attempts for this account. Try again in ${userCheck.retryAfterSeconds}s.` },
+        {
+          status: 429,
+          headers: { "Retry-After": String(userCheck.retryAfterSeconds) },
+        }
+      );
+    }
 
     const db = await getDb();
     const res = await db.execute({
@@ -52,6 +83,9 @@ export async function POST(request: Request) {
         { status: 401 }
       );
     }
+
+    // Clear per-username rate limit after valid login
+    await clearRateLimit(userKey);
 
     const userId = String(row.id);
     const session = await createSession(userId);

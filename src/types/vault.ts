@@ -36,6 +36,7 @@ export interface NoteRecord extends NoteMetadata {
   sizeBytes: number;
   createdAt: number;
   updatedAt: number;
+  deletedAt?: number | null;
 }
 
 export interface EncryptedNoteDTO {
@@ -46,6 +47,7 @@ export interface EncryptedNoteDTO {
   sizeBytes: number;
   createdAt: number;
   updatedAt: number;
+  deletedAt?: number | null;
 }
 
 export interface NoteRevisionSummary {
@@ -65,6 +67,7 @@ export interface EditorSettings {
   theme: ThemeMode;
   fontSize: number;
   sessionTtlMinutes: number; // 0 = never remember key across reloads, 15, 60, 1440
+  idleLockMinutes: number; // 0 = off, 5, 15, 30, 60
   autoSave: boolean;
   showLineNumbers: boolean;
   tabSize: number;
@@ -121,6 +124,7 @@ export const DEFAULT_SETTINGS: EditorSettings = {
   theme: "midnight",
   fontSize: 14,
   sessionTtlMinutes: 60,
+  idleLockMinutes: 30,
   autoSave: false,
   showLineNumbers: true,
   tabSize: 2,

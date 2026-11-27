@@ -8,6 +8,7 @@ import {
   LogOut,
   Palette,
   Settings,
+  ShieldCheck,
   Trash2,
   X,
 } from "lucide-react";
@@ -19,6 +20,7 @@ interface SettingsModalProps {
   settings: EditorSettings;
   onUpdateSettings: (next: EditorSettings) => void;
   onChangePassword: (currentPassword: string, newPassword: string) => Promise<void>;
+  onOpenBackup: () => void;
   onLockNow: () => void;
   onSignOut: () => Promise<void>;
   onDeleteAccount: (currentPassword: string) => Promise<void>;
@@ -38,6 +40,7 @@ export default function SettingsModal({
   settings,
   onUpdateSettings,
   onChangePassword,
+  onOpenBackup,
   onLockNow,
   onSignOut,
   onDeleteAccount,
@@ -77,7 +80,9 @@ export default function SettingsModal({
       setCurrentPwd("");
       setNewPwd("");
       setConfirmPwd("");
-      setPwdStatus({ msg: "All notes atomically re-encrypted under your new password!" });
+      setPwdStatus({
+        msg: "Password updated, all notes re-encrypted, and other sessions signed out!",
+      });
     } catch (err) {
       setPwdStatus({
         msg: err instanceof Error ? err.message : "Failed to update password.",
@@ -266,6 +271,36 @@ export default function SettingsModal({
               </div>
             </div>
 
+            <div>
+              <label className="block text-xs text-[#c9d1d9] mb-1.5">
+                Auto-Lock After Inactivity <span className="text-[11px] font-mono text-[#6e7681]">(Quick lock: ⌘⇧L)</span>
+              </label>
+              <div className="grid grid-cols-5 gap-1.5">
+                {[
+                  { mins: 0, label: "Off" },
+                  { mins: 5, label: "5 min" },
+                  { mins: 15, label: "15 min" },
+                  { mins: 30, label: "30 min" },
+                  { mins: 60, label: "1 hour" },
+                ].map((opt) => (
+                  <button
+                    key={opt.mins}
+                    type="button"
+                    onClick={() =>
+                      onUpdateSettings({ ...settings, idleLockMinutes: opt.mins })
+                    }
+                    className={`py-1.5 rounded-lg text-xs border cursor-pointer transition-colors ${
+                      (settings.idleLockMinutes ?? 0) === opt.mins
+                        ? "bg-amber-500/15 border-amber-500/60 text-amber-300 font-medium"
+                        : "bg-[#0d1117] border-[#2b323d] text-[#8b949e] hover:text-white"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <form onSubmit={handlePasswordSubmit} className="space-y-2 pt-1">
               <label className="block text-xs text-[#c9d1d9]">
                 Change Master Password (re-encrypts all notes)
@@ -311,7 +346,19 @@ export default function SettingsModal({
               </div>
             </form>
 
-            <div className="grid grid-cols-2 gap-2 pt-1">
+            <div className="grid grid-cols-3 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenBackup();
+                }}
+                className="p-2.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Backup / Restore</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -321,7 +368,7 @@ export default function SettingsModal({
                 className="p-2.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Lock className="w-3.5 h-3.5" />
-                <span>Lock Vault Now</span>
+                <span>Lock Vault</span>
               </button>
 
               <button

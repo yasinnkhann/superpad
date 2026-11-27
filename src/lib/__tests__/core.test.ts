@@ -30,6 +30,13 @@ import {
   verifyAuthKey,
 } from "@/lib/auth";
 import { getDb, resetDbClientForTests } from "@/lib/db";
+import { checkRateLimit, clearRateLimit } from "@/lib/rateLimit";
+import {
+  createEncryptedBackupJson,
+  createPlaintextBackupJson,
+  decryptBackupFile,
+  inspectBackupFile,
+} from "@/lib/backup";
 import type { NoteRecord } from "@/types/vault";
 
 describe("SuperPad Split-Key Crypto Engine", () => {
@@ -238,5 +245,66 @@ describe("Turso / libSQL Schema & Server Auth", () => {
     await revokeSessionByToken(session.token);
     const afterRevoke = await getAuthenticatedUserFromToken(session.token);
     expect(afterRevoke).toBeNull();
+  });
+
+  it("enforces persistent rate limits and clears keys cleanly", async () => {
+    const key = "test:login:ip:127.0.0.1";
+    await clearRateLimit(key);
+
+    const r1 = await checkRateLimit(key, 2, 60_000);
+    const r2 = await checkRateLimit(key, 2, 60_000);
+    const r3 = await checkRateLimit(key, 2, 60_000);
+
+    expect(r1.allowed).toBe(true);
+    expect(r2.allowed).toBe(true);
+    expect(r3.allowed).toBe(false);
+    expect(r3.retryAfterSeconds).toBeGreaterThan(0);
+
+    await clearRateLimit(key);
+    const r4 = await checkRateLimit(key, 2, 60_000);
+    expect(r4.allowed).toBe(true);
+  });
+
+  it("supports encrypted and plaintext backup export/restore round-trips", async () => {
+    const sampleNotes: NoteRecord[] = [
+      {
+        id: "n-1",
+        title: "plan.md",
+        folder: "Work",
+        language: "markdown",
+        wordWrap: true,
+        bookmarks: [2],
+        pinned: true,
+        content: "# Roadmap\n- [x] Ship SuperPad",
+        version: 3,
+        sizeBytes: 28,
+        createdAt: 100,
+        updatedAt: 200,
+      },
+    ];
+
+    const plainJson = createPlaintextBackupJson(sampleNotes, ["Work", "EmptyFolder"]);
+    const inspectedPlain = inspectBackupFile(plainJson);
+    expect(inspectedPlain.kind).toBe("plaintext");
+    if (inspectedPlain.kind === "plaintext") {
+      expect(inspectedPlain.notes).toHaveLength(1);
+      expect(inspectedPlain.notes[0].title).toBe("plan.md");
+      expect(inspectedPlain.folders).toEqual(["EmptyFolder", "Work"]);
+    }
+
+    const encJson = await createEncryptedBackupJson(sampleNotes, ["Work", "EmptyFolder"], "backup-pass-99");
+    expect(encJson).not.toContain("Roadmap");
+    expect(encJson).not.toContain("plan.md");
+
+    const inspectedEnc = inspectBackupFile(encJson);
+    expect(inspectedEnc.kind).toBe("encrypted");
+    if (inspectedEnc.kind === "encrypted") {
+      await expect(decryptBackupFile(inspectedEnc.payload, "wrong-pass")).rejects.toThrow();
+      const restored = await decryptBackupFile(inspectedEnc.payload, "backup-pass-99");
+      expect(restored.notes).toHaveLength(1);
+      expect(restored.notes[0].content).toBe("# Roadmap\n- [x] Ship SuperPad");
+      expect(restored.notes[0].pinned).toBe(true);
+      expect(restored.folders).toEqual(["EmptyFolder", "Work"]);
+    }
   });
 });

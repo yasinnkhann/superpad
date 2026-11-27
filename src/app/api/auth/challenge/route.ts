@@ -1,11 +1,27 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generateDecoySalt, validateUsername } from "@/lib/auth";
+import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
 
+const CHALLENGE_WINDOW_MS = 15 * 60 * 1000;
+const CHALLENGE_IP_LIMIT = 40;
+
 export async function POST(request: Request) {
   try {
+    const ip = getClientIp(request);
+    const ipCheck = await checkRateLimit(`challenge:ip:${ip}`, CHALLENGE_IP_LIMIT, CHALLENGE_WINDOW_MS);
+    if (!ipCheck.allowed) {
+      return NextResponse.json(
+        { error: `Too many requests. Try again in ${ipCheck.retryAfterSeconds}s.` },
+        {
+          status: 429,
+          headers: { "Retry-After": String(ipCheck.retryAfterSeconds) },
+        }
+      );
+    }
+
     const body = (await request.json()) as { username?: unknown };
     const username = validateUsername(body.username);
     const db = await getDb();

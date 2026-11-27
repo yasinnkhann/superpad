@@ -18,6 +18,7 @@ function mapNoteRow(row: Record<string, unknown>): EncryptedNoteDTO {
     sizeBytes: Number(row.size_bytes),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+    deletedAt: row.deleted_at != null ? Number(row.deleted_at) : null,
   };
 }
 
@@ -33,7 +34,7 @@ export async function GET(
   const { id } = await context.params;
   const db = await getDb();
   const res = await db.execute({
-    sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at
+    sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at, deleted_at
           FROM notes WHERE id = ? AND user_id = ? LIMIT 1`,
     args: [id, user.id],
   });
@@ -89,7 +90,7 @@ export async function PUT(
     const tx = await db.transaction("write");
     try {
       const existingRes = await tx.execute({
-        sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at
+        sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at, deleted_at
               FROM notes WHERE id = ? AND user_id = ? LIMIT 1`,
         args: [id, user.id],
       });
@@ -117,7 +118,7 @@ export async function PUT(
 
       await tx.execute({
         sql: `UPDATE notes
-              SET encrypted_meta = ?, encrypted_content = ?, version = ?, size_bytes = ?, updated_at = ?
+              SET encrypted_meta = ?, encrypted_content = ?, version = ?, size_bytes = ?, updated_at = ?, deleted_at = NULL
               WHERE id = ? AND user_id = ?`,
         args: [encryptedMeta, encryptedContent, nextVersion, sizeBytes, now, id, user.id],
       });
@@ -159,6 +160,7 @@ export async function PUT(
         sizeBytes,
         createdAt: Number(existing.created_at),
         updatedAt: now,
+        deletedAt: null,
       };
 
       metric("superpad.notes.update", 1, { outcome: "success", backend });
@@ -178,8 +180,8 @@ export async function PUT(
   }
 }
 
-export async function DELETE(
-  _request: Request,
+export async function PATCH(
+  request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   const startedAt = performance.now();
@@ -192,18 +194,87 @@ export async function DELETE(
     }
 
     const { id } = await context.params;
+    const body = (await request.json().catch(() => ({}))) as { action?: string };
+    if (body.action !== "restore") {
+      return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
+    }
+
     const db = await getDb();
+    const now = Date.now();
     const res = await db.execute({
-      sql: `DELETE FROM notes WHERE id = ? AND user_id = ?`,
-      args: [id, user.id],
+      sql: `UPDATE notes SET deleted_at = NULL, updated_at = ? WHERE id = ? AND user_id = ?`,
+      args: [now, id, user.id],
     });
 
     if (res.rowsAffected === 0) {
       return NextResponse.json({ error: "Note not found" }, { status: 404 });
     }
 
-    metric("superpad.notes.delete", 1, { outcome: "success", backend });
-    return NextResponse.json({ success: true });
+    const fetched = await db.execute({
+      sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at, deleted_at
+            FROM notes WHERE id = ? AND user_id = ? LIMIT 1`,
+      args: [id, user.id],
+    });
+
+    metric("superpad.notes.restore", 1, { outcome: "success", backend });
+    return NextResponse.json({
+      success: true,
+      note: fetched.rows[0]
+        ? mapNoteRow(fetched.rows[0] as unknown as Record<string, unknown>)
+        : null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to restore note";
+    metric("superpad.notes.restore", 1, { outcome: "error", backend });
+    return NextResponse.json({ error: message }, { status: 500 });
+  } finally {
+    metric("superpad.notes.restore.duration_ms", performance.now() - startedAt, { backend });
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  const startedAt = performance.now();
+  const backend = getDbBackend();
+
+  try {
+    const user = await getAuthenticatedUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { id } = await context.params;
+    const url = new URL(request.url);
+    const permanent = url.searchParams.get("permanent") === "1";
+
+    const db = await getDb();
+
+    if (permanent) {
+      const res = await db.execute({
+        sql: `DELETE FROM notes WHERE id = ? AND user_id = ?`,
+        args: [id, user.id],
+      });
+      if (res.rowsAffected === 0) {
+        return NextResponse.json({ error: "Note not found" }, { status: 404 });
+      }
+      metric("superpad.notes.delete", 1, { outcome: "permanent", backend });
+      return NextResponse.json({ success: true, permanent: true });
+    }
+
+    const now = Date.now();
+    const res = await db.execute({
+      sql: `UPDATE notes SET deleted_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+      args: [now, now, id, user.id],
+    });
+
+    if (res.rowsAffected === 0) {
+      return NextResponse.json({ error: "Note not found" }, { status: 404 });
+    }
+
+    metric("superpad.notes.delete", 1, { outcome: "trashed", backend });
+    return NextResponse.json({ success: true, permanent: false, deletedAt: now });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to delete note";
     metric("superpad.notes.delete", 1, { outcome: "error", backend });

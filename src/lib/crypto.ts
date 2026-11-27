@@ -176,6 +176,7 @@ export async function decryptNoteDTO(
     sizeBytes: dto.sizeBytes,
     createdAt: dto.createdAt,
     updatedAt: dto.updatedAt,
+    deletedAt: dto.deletedAt ?? null,
   };
 }
 

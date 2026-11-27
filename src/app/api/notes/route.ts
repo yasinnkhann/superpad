@@ -7,6 +7,8 @@ import type { EncryptedNoteDTO } from "@/types/vault";
 
 export const dynamic = "force-dynamic";
 
+const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
 function mapNoteRow(row: Record<string, unknown>): EncryptedNoteDTO {
   return {
     id: String(row.id),
@@ -16,6 +18,7 @@ function mapNoteRow(row: Record<string, unknown>): EncryptedNoteDTO {
     sizeBytes: Number(row.size_bytes),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+    deletedAt: row.deleted_at != null ? Number(row.deleted_at) : null,
   };
 }
 
@@ -30,20 +33,32 @@ export async function GET() {
     }
 
     const db = await getDb();
+    const cutoff = Date.now() - TRASH_RETENTION_MS;
+
+    // Auto-purge trashed notes older than 30 days
+    await db.execute({
+      sql: `DELETE FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at < ?`,
+      args: [user.id, cutoff],
+    });
+
     const res = await db.execute({
-      sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at
+      sql: `SELECT id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at, deleted_at
             FROM notes
             WHERE user_id = ?
             ORDER BY updated_at DESC`,
       args: [user.id],
     });
 
-    const notes = res.rows.map((r) => mapNoteRow(r as unknown as Record<string, unknown>));
+    const all = res.rows.map((r) => mapNoteRow(r as unknown as Record<string, unknown>));
+    const notes = all.filter((n) => !n.deletedAt);
+    const trashedNotes = all
+      .filter((n) => Boolean(n.deletedAt))
+      .sort((a, b) => (b.deletedAt ?? 0) - (a.deletedAt ?? 0));
     const totalBytes = notes.reduce((acc, n) => acc + n.sizeBytes, 0);
 
     metric("superpad.notes.list", 1, { outcome: "success", backend });
     return NextResponse.json(
-      { notes, totalBytes, backend },
+      { notes, trashedNotes, totalBytes, backend },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
@@ -89,8 +104,8 @@ export async function POST(request: Request) {
     const tx = await db.transaction("write");
     try {
       await tx.execute({
-        sql: `INSERT INTO notes (id, user_id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at)
-              VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+        sql: `INSERT INTO notes (id, user_id, encrypted_meta, encrypted_content, version, size_bytes, created_at, updated_at, deleted_at)
+              VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL)`,
         args: [noteId, user.id, encryptedMeta, encryptedContent, sizeBytes, now, now],
       });
       await tx.execute({
@@ -112,6 +127,7 @@ export async function POST(request: Request) {
       sizeBytes,
       createdAt: now,
       updatedAt: now,
+      deletedAt: null,
     };
 
     metric("superpad.notes.create", 1, { outcome: "success", backend });
@@ -123,5 +139,37 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status });
   } finally {
     metric("superpad.notes.create.duration_ms", performance.now() - startedAt, { backend });
+  }
+}
+
+export async function DELETE(request: Request) {
+  const startedAt = performance.now();
+  const backend = getDbBackend();
+
+  try {
+    const user = await getAuthenticatedUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    if (url.searchParams.get("trash") !== "all") {
+      return NextResponse.json({ error: "Specify ?trash=all to empty trash." }, { status: 400 });
+    }
+
+    const db = await getDb();
+    const res = await db.execute({
+      sql: `DELETE FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL`,
+      args: [user.id],
+    });
+
+    metric("superpad.notes.empty_trash", 1, { outcome: "success", backend });
+    return NextResponse.json({ success: true, deletedCount: res.rowsAffected });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to empty trash";
+    metric("superpad.notes.empty_trash", 1, { outcome: "error", backend });
+    return NextResponse.json({ error: message }, { status: 500 });
+  } finally {
+    metric("superpad.notes.empty_trash.duration_ms", performance.now() - startedAt, { backend });
   }
 }

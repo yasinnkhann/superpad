@@ -7,7 +7,9 @@ import {
   Bookmark,
   Calendar,
   Columns2,
+  Command,
   Download,
+  Eye,
   FileCode2,
   FilePlus,
   FileText,
@@ -82,18 +84,46 @@ import CodeEditor, {
   SearchMatchSummary,
   SearchOptions,
 } from "@/components/CodeEditor";
-import FileSidebar from "@/components/FileSidebar";
+import FileSidebar, { NOTE_DRAG_MIME } from "@/components/FileSidebar";
 import FindReplaceBar from "@/components/FindReplaceBar";
 import ScannerModal from "@/components/ScannerModal";
 import HistoryDrawer from "@/components/HistoryDrawer";
 import SettingsModal from "@/components/SettingsModal";
+import CommandPalette, { PaletteCommand } from "@/components/CommandPalette";
+import MarkdownPreview from "@/components/MarkdownPreview";
+import BackupModal from "@/components/BackupModal";
+import { createPlaintextBackupJson, type BackupNoteEntry } from "@/lib/backup";
 
 type WorkspacePhase = "checking" | "locked" | "ready";
+type MarkdownPreviewMode = "edit" | "split" | "preview";
 
 interface ConflictState {
   noteId: string;
   localVersion: number;
   remoteNote: NoteRecord;
+}
+
+interface ToastState {
+  id: number;
+  msg: string;
+  type?: "info" | "success" | "error";
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+interface PersistedWorkspace {
+  openTabIds: string[];
+  activeNoteId: string | null;
+  splitNoteId: string | null;
+  collapsedFolders: string[];
+}
+
+function getWorkspaceStorageKey(username: string): string {
+  return `superpad:v2:workspace:${username}`;
+}
+
+function getFoldersStorageKey(username: string): string {
+  return `superpad:v2:folders:${username}`;
 }
 
 function serializeNoteForDiff(note: NoteRecord | undefined): string {
@@ -121,21 +151,26 @@ export default function VaultWorkspace() {
   const [unlockPwd, setUnlockPwd] = useState("");
   const [unlockError, setUnlockError] = useState("");
   const [unlocking, setUnlocking] = useState(false);
+  const [lockNotice, setLockNotice] = useState("");
 
   // Notes & Tabs State
   const [notes, setNotes] = useState<NoteRecord[]>([]);
+  const [trashedNotes, setTrashedNotes] = useState<NoteRecord[]>([]);
   const [savedSnapshots, setSavedSnapshots] = useState<Map<string, string>>(new Map());
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [splitNoteId, setSplitNoteId] = useState<string | null>(null);
   const [extraFolders, setExtraFolders] = useState<string[]>([]);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
+  const [syncingCloud, setSyncingCloud] = useState(false);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
 
   // Editor & UI State
   const [settings, setSettings] = useState<EditorSettings>(DEFAULT_SETTINGS);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [focusedPane, setFocusedPane] = useState<"primary" | "split">("primary");
+  const [mdPreviewMode, setMdPreviewMode] = useState<MarkdownPreviewMode>("edit");
   const [cursorStats, setCursorStats] = useState<CursorStats>({
     line: 1,
     col: 1,
@@ -154,6 +189,8 @@ export default function VaultWorkspace() {
     total: 0,
     currentIndex: 0,
   });
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -161,9 +198,7 @@ export default function VaultWorkspace() {
   const [goToLineOpen, setGoToLineOpen] = useState(false);
   const [goToLineInput, setGoToLineInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; type?: "info" | "success" | "error" } | null>(
-    null
-  );
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   // Refs
   const primaryEditorRef = useRef<CodeEditorHandle | null>(null);
@@ -171,19 +206,44 @@ export default function VaultWorkspace() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastSeqRef = useRef(0);
+  const lastSyncAtRef = useRef<number>(0);
+  const lastActivityAtRef = useRef<number>(Date.now());
+  const notesRef = useRef<NoteRecord[]>(notes);
+  notesRef.current = notes;
+  const dirtyNoteIdsRef = useRef<Set<string>>(new Set());
 
   const showToast = useCallback(
-    (msg: string, type: "info" | "success" | "error" = "info") => {
-      setToast({ msg, type });
-      setTimeout(() => {
-        setToast((cur) => (cur?.msg === msg ? null : cur));
-      }, 3000);
+    (
+      msg: string,
+      type: "info" | "success" | "error" = "info",
+      action?: { label: string; onAction: () => void }
+    ) => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      const id = ++toastSeqRef.current;
+      setToast({
+        id,
+        msg,
+        type,
+        actionLabel: action?.label,
+        onAction: action?.onAction,
+      });
+      toastTimerRef.current = setTimeout(
+        () => {
+          setToast((cur) => (cur?.id === id ? null : cur));
+        },
+        action ? 5500 : 3000
+      );
     },
     []
   );
 
   useEffect(() => {
     setSettings(getStoredSettings(DEFAULT_SETTINGS));
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
   }, []);
 
   const handleUpdateSettings = useCallback(
@@ -208,6 +268,7 @@ export default function VaultWorkspace() {
     }
     return set;
   }, [notes, savedSnapshots]);
+  dirtyNoteIdsRef.current = dirtyNoteIds;
 
   const notesById = useMemo(() => {
     const map = new Map<string, NoteRecord>();
@@ -231,7 +292,7 @@ export default function VaultWorkspace() {
     [notes]
   );
 
-  // Load & decrypt all notes for an authenticated user + recover encrypted IndexedDB drafts
+  // Load & decrypt all notes for an authenticated user + recover encrypted IndexedDB drafts + restore tabs
   const loadAccountNotes = useCallback(
     async (authUser: AuthUser, key: CryptoKey) => {
       const res = await fetch("/api/notes", { cache: "no-store" });
@@ -239,12 +300,18 @@ export default function VaultWorkspace() {
         router.replace("/");
         return;
       }
-      const data = (await res.json()) as { notes: EncryptedNoteDTO[]; backend?: string };
+      const data = (await res.json()) as {
+        notes: EncryptedNoteDTO[];
+        trashedNotes?: EncryptedNoteDTO[];
+        backend?: string;
+      };
       if (data.backend) setDbBackend(data.backend);
+      lastSyncAtRef.current = Date.now();
 
-      const decrypted = await Promise.all(
-        (data.notes || []).map((dto) => decryptNoteDTO(dto, key))
-      );
+      const [decrypted, decryptedTrash] = await Promise.all([
+        Promise.all((data.notes || []).map((dto) => decryptNoteDTO(dto, key))),
+        Promise.all((data.trashedNotes || []).map((dto) => decryptNoteDTO(dto, key))),
+      ]);
 
       // Build clean saved snapshots map
       const snapMap = new Map<string, string>();
@@ -270,11 +337,16 @@ export default function VaultWorkspace() {
       });
 
       setNotes(mergedNotes);
+      setTrashedNotes(decryptedTrash);
       setSavedSnapshots(snapMap);
+
+      let restoredTabs: string[] = [];
+      let restoredActive: string | null = null;
+      let restoredSplit: string | null = null;
 
       if (typeof window !== "undefined") {
         try {
-          const savedFolders = localStorage.getItem(`superpad:v2:folders:${authUser.username}`);
+          const savedFolders = localStorage.getItem(getFoldersStorageKey(authUser.username));
           if (savedFolders) {
             const parsed = JSON.parse(savedFolders);
             if (Array.isArray(parsed)) {
@@ -282,16 +354,51 @@ export default function VaultWorkspace() {
             }
           }
         } catch {}
+
+        try {
+          const rawWs = localStorage.getItem(getWorkspaceStorageKey(authUser.username));
+          if (rawWs) {
+            const parsedWs = JSON.parse(rawWs) as Partial<PersistedWorkspace>;
+            const validIds = new Set(mergedNotes.map((n) => n.id));
+            if (Array.isArray(parsedWs.openTabIds)) {
+              restoredTabs = parsedWs.openTabIds.filter(
+                (id): id is string => typeof id === "string" && validIds.has(id)
+              );
+            }
+            if (typeof parsedWs.activeNoteId === "string" && validIds.has(parsedWs.activeNoteId)) {
+              restoredActive = parsedWs.activeNoteId;
+              if (!restoredTabs.includes(restoredActive)) {
+                restoredTabs = [...restoredTabs, restoredActive];
+              }
+            }
+            if (typeof parsedWs.splitNoteId === "string" && validIds.has(parsedWs.splitNoteId)) {
+              restoredSplit = parsedWs.splitNoteId;
+            }
+            if (Array.isArray(parsedWs.collapsedFolders)) {
+              setCollapsedFolders(
+                new Set(parsedWs.collapsedFolders.filter((f): f is string => typeof f === "string"))
+              );
+            }
+          }
+        } catch {}
       }
 
-      if (mergedNotes.length > 0) {
+      if (restoredTabs.length > 0) {
+        setOpenTabIds(restoredTabs);
+        setActiveNoteId(restoredActive ?? restoredTabs[0]);
+        setSplitNoteId(restoredSplit);
+      } else if (mergedNotes.length > 0) {
         const first = mergedNotes[0];
         setOpenTabIds([first.id]);
         setActiveNoteId(first.id);
+        setSplitNoteId(null);
       } else {
         setOpenTabIds([]);
         setActiveNoteId(null);
+        setSplitNoteId(null);
       }
+      setLockNotice("");
+      lastActivityAtRef.current = Date.now();
       setPhase("ready");
 
       if (recoveredCount > 0) {
@@ -303,6 +410,145 @@ export default function VaultWorkspace() {
     },
     [router, showToast]
   );
+
+  // Persist open tabs, active tab, split tab, and collapsed folders across reloads
+  useEffect(() => {
+    if (phase !== "ready" || !user?.username || typeof window === "undefined") return;
+    try {
+      const stateToSave: PersistedWorkspace = {
+        openTabIds,
+        activeNoteId,
+        splitNoteId,
+        collapsedFolders: Array.from(collapsedFolders),
+      };
+      localStorage.setItem(getWorkspaceStorageKey(user.username), JSON.stringify(stateToSave));
+    } catch {}
+  }, [phase, user?.username, openTabIds, activeNoteId, splitNoteId, collapsedFolders]);
+
+  // Multi-device cloud sync (pull updates without ever clobbering local unsaved changes)
+  const syncWithCloud = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!user || !encryptionKey || syncingCloud) return;
+      setSyncingCloud(true);
+      try {
+        const res = await fetch("/api/notes", { cache: "no-store" });
+        if (res.status === 401) {
+          router.replace("/");
+          return;
+        }
+        if (!res.ok) throw new Error("Sync failed");
+        const data = (await res.json()) as {
+          notes: EncryptedNoteDTO[];
+          trashedNotes?: EncryptedNoteDTO[];
+          backend?: string;
+        };
+        if (data.backend) setDbBackend(data.backend);
+        lastSyncAtRef.current = Date.now();
+
+        const [remoteNotes, remoteTrash] = await Promise.all([
+          Promise.all((data.notes || []).map((dto) => decryptNoteDTO(dto, encryptionKey))),
+          Promise.all((data.trashedNotes || []).map((dto) => decryptNoteDTO(dto, encryptionKey))),
+        ]);
+
+        const localNotes = notesRef.current;
+        const localById = new Map(localNotes.map((n) => [n.id, n]));
+        const dirtySet = dirtyNoteIdsRef.current;
+
+        let updatedCount = 0;
+        let addedCount = 0;
+        let detectedConflict: ConflictState | null = null;
+        const merged: NoteRecord[] = [];
+        const remoteIds = new Set<string>();
+
+        for (const rNote of remoteNotes) {
+          remoteIds.add(rNote.id);
+          const local = localById.get(rNote.id);
+          if (!local) {
+            merged.push(rNote);
+            addedCount++;
+          } else if (dirtySet.has(rNote.id)) {
+            // Preserve unsaved local edits; flag conflict if another device saved a newer version
+            merged.push(local);
+            if (rNote.version > local.version && !detectedConflict) {
+              detectedConflict = {
+                noteId: rNote.id,
+                localVersion: local.version,
+                remoteNote: rNote,
+              };
+            }
+          } else if (rNote.version !== local.version || rNote.updatedAt !== local.updatedAt) {
+            merged.push(rNote);
+            updatedCount++;
+          } else {
+            merged.push(local);
+          }
+        }
+
+        // Keep any locally-dirty note even if another device trashed it
+        for (const lNote of localNotes) {
+          if (!remoteIds.has(lNote.id) && dirtySet.has(lNote.id)) {
+            merged.push(lNote);
+          }
+        }
+
+        setNotes(merged);
+        setTrashedNotes(remoteTrash);
+        setSavedSnapshots((prev) => {
+          const next = new Map(prev);
+          for (const rNote of remoteNotes) {
+            if (!dirtySet.has(rNote.id)) {
+              next.set(rNote.id, serializeNoteForDiff(rNote));
+            }
+          }
+          return next;
+        });
+
+        // Clean up tabs for notes deleted on another device
+        const mergedIds = new Set(merged.map((n) => n.id));
+        setOpenTabIds((prev) => prev.filter((id) => mergedIds.has(id)));
+        setActiveNoteId((cur) => (cur && mergedIds.has(cur) ? cur : merged[0]?.id ?? null));
+        setSplitNoteId((cur) => (cur && mergedIds.has(cur) ? cur : null));
+
+        if (detectedConflict) {
+          setConflict(detectedConflict);
+          showToast(
+            `Sync conflict on "${detectedConflict.remoteNote.title}" — edited on another device`,
+            "error"
+          );
+        } else if (updatedCount > 0 || addedCount > 0) {
+          const parts: string[] = [];
+          if (addedCount > 0) parts.push(`${addedCount} new`);
+          if (updatedCount > 0) parts.push(`${updatedCount} updated`);
+          showToast(`Synced from cloud (${parts.join(", ")})`, "info");
+        } else if (!opts?.silent) {
+          showToast("Vault is up to date", "success");
+        }
+      } catch (err) {
+        if (!opts?.silent) {
+          showToast(err instanceof Error ? err.message : "Could not sync", "error");
+        }
+      } finally {
+        setSyncingCloud(false);
+      }
+    },
+    [user, encryptionKey, syncingCloud, router, showToast]
+  );
+
+  // Automatic multi-device sync when returning to the browser tab (throttled to 15s)
+  useEffect(() => {
+    if (phase !== "ready" || !user || !encryptionKey) return;
+    const maybeSync = () => {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - lastSyncAtRef.current < 15_000) return;
+      void syncWithCloud({ silent: true });
+    };
+    window.addEventListener("focus", maybeSync);
+    document.addEventListener("visibilitychange", maybeSync);
+    return () => {
+      window.removeEventListener("focus", maybeSync);
+      document.removeEventListener("visibilitychange", maybeSync);
+    };
+  }, [phase, user, encryptionKey, syncWithCloud]);
 
   // Bootstrap: check HttpOnly session -> check in-memory / cached key -> zero-flicker unlock!
   useEffect(() => {
@@ -570,22 +816,62 @@ export default function VaultWorkspace() {
     [encryptionKey, notes.length, showToast]
   );
 
-  const handleDeleteNote = async (noteId: string, skipConfirm = false) => {
+  const handleRestoreNote = useCallback(
+    async (noteId: string) => {
+      if (!encryptionKey) return;
+      try {
+        const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "restore" }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to restore note");
+
+        let restored: NoteRecord | null = null;
+        if (data.note) {
+          restored = await decryptNoteDTO(data.note, encryptionKey);
+        } else {
+          const fromTrash = trashedNotes.find((n) => n.id === noteId);
+          if (fromTrash) restored = { ...fromTrash, deletedAt: null };
+        }
+
+        if (restored) {
+          const safeNote = restored;
+          setTrashedNotes((prev) => prev.filter((n) => n.id !== noteId));
+          setNotes((prev) => [safeNote, ...prev.filter((n) => n.id !== noteId)]);
+          setSavedSnapshots((prev) => {
+            const next = new Map(prev);
+            next.set(safeNote.id, serializeNoteForDiff(safeNote));
+            return next;
+          });
+          setOpenTabIds((prev) => (prev.includes(safeNote.id) ? prev : [...prev, safeNote.id]));
+          setActiveNoteId(safeNote.id);
+          setFocusedPane("primary");
+          showToast(`Restored "${safeNote.title}"`, "success");
+        }
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Restore failed", "error");
+      }
+    },
+    [encryptionKey, trashedNotes, showToast]
+  );
+
+  const handleDeleteNote = async (noteId: string, forcePermanent = false) => {
     const target = notesById.get(noteId);
     if (!target) return;
 
-    // Never prompt confirmation for empty/untouched notes
+    // Empty / untouched notes delete permanently and silently so they don't clutter Trash
     const isEmpty = !target.content || target.content.trim() === "";
-    if (!skipConfirm && !isEmpty) {
-      if (!window.confirm(`Permanently delete "${target.title}" and its backup history?`)) {
-        return;
-      }
-    }
+    const permanent = forcePermanent || isEmpty;
+
     try {
-      const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}`, {
-        method: "DELETE",
-      });
+      const url = permanent
+        ? `/api/notes/${encodeURIComponent(noteId)}?permanent=1`
+        : `/api/notes/${encodeURIComponent(noteId)}`;
+      const res = await fetch(url, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete note");
+      const data = await res.json().catch(() => ({}));
       void deleteEncryptedDraft(noteId);
 
       const remainingNotes = notes.filter((n) => n.id !== noteId);
@@ -603,9 +889,61 @@ export default function VaultWorkspace() {
       if (splitNoteId === noteId) {
         setSplitNoteId(null);
       }
-      showToast(`Deleted "${target.title}"`, "info");
+
+      if (permanent) {
+        showToast(`Deleted "${target.title}"`, "info");
+      } else {
+        const trashed: NoteRecord = {
+          ...target,
+          deletedAt: typeof data.deletedAt === "number" ? data.deletedAt : Date.now(),
+        };
+        setTrashedNotes((prev) => [trashed, ...prev.filter((n) => n.id !== noteId)]);
+        showToast(`Moved "${target.title}" to Trash`, "info", {
+          label: "Undo",
+          onAction: () => void handleRestoreNote(noteId),
+        });
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Delete failed", "error");
+    }
+  };
+
+  const handlePermanentDeleteNote = async (noteId: string) => {
+    const target = trashedNotes.find((n) => n.id === noteId);
+    if (!target) return;
+    if (!window.confirm(`Permanently delete "${target.title}" and its backup history?`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/notes/${encodeURIComponent(noteId)}?permanent=1`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Failed to delete note");
+      setTrashedNotes((prev) => prev.filter((n) => n.id !== noteId));
+      showToast(`Permanently deleted "${target.title}"`, "info");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Delete failed", "error");
+    }
+  };
+
+  const handleEmptyTrash = async () => {
+    if (trashedNotes.length === 0) return;
+    if (
+      !window.confirm(
+        `Permanently delete all ${trashedNotes.length} note${
+          trashedNotes.length === 1 ? "" : "s"
+        } in Trash? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/notes?trash=all`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to empty trash");
+      setTrashedNotes([]);
+      showToast("Trash emptied", "info");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to empty trash", "error");
     }
   };
 
@@ -738,9 +1076,51 @@ export default function VaultWorkspace() {
       const next = prev.includes(trimmed) ? prev : [...prev, trimmed];
       if (user?.username && typeof window !== "undefined") {
         try {
-          localStorage.setItem(`superpad:v2:folders:${user.username}`, JSON.stringify(next));
+          localStorage.setItem(getFoldersStorageKey(user.username), JSON.stringify(next));
         } catch {}
       }
+      return next;
+    });
+  };
+
+  const handleRenameFolder = (oldName: string, newName: string) => {
+    const trimmed = newName.trim().replace(/^\/+|\/+$/g, "");
+    if (!trimmed || trimmed === oldName) return;
+
+    const affected = notes.filter((n) => n.folder === oldName);
+    for (const note of affected) {
+      const updated: NoteRecord = { ...note, folder: trimmed, updatedAt: Date.now() };
+      setNotes((prev) => prev.map((n) => (n.id === note.id ? updated : n)));
+      void saveNoteById(note.id, { noteOverride: updated });
+    }
+
+    setExtraFolders((prev) => {
+      const replaced = prev.map((f) => (f === oldName ? trimmed : f));
+      const next = Array.from(new Set(replaced.includes(trimmed) ? replaced : [...replaced, trimmed]));
+      if (user?.username && typeof window !== "undefined") {
+        try {
+          localStorage.setItem(getFoldersStorageKey(user.username), JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+
+    setCollapsedFolders((prev) => {
+      if (!prev.has(oldName)) return prev;
+      const next = new Set(prev);
+      next.delete(oldName);
+      next.add(trimmed);
+      return next;
+    });
+
+    showToast(`Renamed folder "${oldName}" → "${trimmed}"`, "success");
+  };
+
+  const handleToggleFolder = (folderName: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderName)) next.delete(folderName);
+      else next.add(folderName);
       return next;
     });
   };
@@ -768,7 +1148,7 @@ export default function VaultWorkspace() {
       const next = prev.filter((f) => f !== folderName);
       if (user?.username && typeof window !== "undefined") {
         try {
-          localStorage.setItem(`superpad:v2:folders:${user.username}`, JSON.stringify(next));
+          localStorage.setItem(getFoldersStorageKey(user.username), JSON.stringify(next));
         } catch {}
       }
       return next;
@@ -776,6 +1156,104 @@ export default function VaultWorkspace() {
 
     showToast(`Deleted folder "${folderName}"`, "info");
   };
+
+  const handleToggleMarkdownCheckbox = useCallback(
+    (lineIndex: number) => {
+      if (!activeNote) return;
+      const lines = activeNote.content.split("\n");
+      const currentLine = lines[lineIndex];
+      if (currentLine === undefined) return;
+      const toggled = currentLine.replace(/^(\s*[-*+]\s+\[)([ xX])(\])/, (_, pre, mark, post) => {
+        return `${pre}${mark.toLowerCase() === "x" ? " " : "x"}${post}`;
+      });
+      if (toggled === currentLine) return;
+      lines[lineIndex] = toggled;
+      const nextContent = lines.join("\n");
+      updateLocalNote(activeNote.id, (n) => ({
+        ...n,
+        content: nextContent,
+        sizeBytes: new TextEncoder().encode(nextContent).length,
+      }));
+    },
+    [activeNote, updateLocalNote]
+  );
+
+  const handleRestoreBackup = useCallback(
+    async (entries: BackupNoteEntry[], folders: string[]): Promise<number> => {
+      if (!encryptionKey) return 0;
+
+      if (folders.length > 0) {
+        setExtraFolders((prev) => {
+          const next = Array.from(new Set([...prev, ...folders]));
+          if (user?.username && typeof window !== "undefined") {
+            try {
+              localStorage.setItem(getFoldersStorageKey(user.username), JSON.stringify(next));
+            } catch {}
+          }
+          return next;
+        });
+      }
+
+      let importedCount = 0;
+      let firstCreatedId: string | null = null;
+      const createdList: NoteRecord[] = [];
+
+      for (const entry of entries) {
+        const meta: NoteMetadata = {
+          title: entry.title,
+          folder: entry.folder,
+          language: entry.language,
+          wordWrap: entry.wordWrap,
+          bookmarks: entry.bookmarks,
+          pinned: entry.pinned,
+        };
+        const id = generateNoteId();
+        const encrypted = await encryptNotePayload(meta, entry.content, encryptionKey);
+        const res = await fetch("/api/notes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, ...encrypted }),
+        });
+        const data = await res.json();
+        if (res.ok && data.note) {
+          const created: NoteRecord = {
+            id: data.note.id,
+            ...meta,
+            content: entry.content,
+            version: data.note.version,
+            sizeBytes: data.note.sizeBytes,
+            createdAt: data.note.createdAt,
+            updatedAt: data.note.updatedAt,
+            deletedAt: null,
+          };
+          createdList.push(created);
+          if (!firstCreatedId) firstCreatedId = created.id;
+          importedCount++;
+        }
+      }
+
+      if (createdList.length > 0) {
+        setNotes((prev) => [...createdList, ...prev]);
+        setSavedSnapshots((prev) => {
+          const next = new Map(prev);
+          for (const c of createdList) {
+            next.set(c.id, serializeNoteForDiff(c));
+          }
+          return next;
+        });
+        if (firstCreatedId) {
+          setOpenTabIds((prev) =>
+            prev.includes(firstCreatedId!) ? prev : [...prev, firstCreatedId!]
+          );
+          setActiveNoteId(firstCreatedId);
+        }
+        showToast(`Restored ${importedCount} note(s) from backup`, "success");
+      }
+
+      return importedCount;
+    },
+    [encryptionKey, user?.username, showToast]
+  );
 
   // Drag & Drop / File Picker Import
   const importFiles = async (files: FileList | File[]) => {
@@ -822,7 +1300,7 @@ export default function VaultWorkspace() {
     const stamp = new Date().toISOString().slice(0, 10);
     downloadFile(
       `superpad-${user?.username ?? "backup"}-${stamp}.json`,
-      JSON.stringify({ exportedAt: new Date().toISOString(), notes }, null, 2),
+      createPlaintextBackupJson(notes, extraFolders),
       "application/json"
     );
     showToast("Downloaded full decrypted JSON backup", "success");
@@ -885,17 +1363,82 @@ export default function VaultWorkspace() {
     router.replace("/");
   };
 
-  const handleLockNow = () => {
-    if (user) clearCachedUserKey(user.id);
-    clearInMemoryKey();
-    setEncryptionKey(null);
-    setSerializedKey("");
-    setNotes([]);
-    setOpenTabIds([]);
-    setActiveNoteId(null);
-    setSplitNoteId(null);
-    setPhase("locked");
-  };
+  const handleLockNow = useCallback(
+    (reason?: string) => {
+      // Flush any unsaved dirty notes to encrypted IndexedDB crash-recovery before wiping memory
+      if (user && encryptionKey) {
+        for (const n of notesRef.current) {
+          if (dirtyNoteIdsRef.current.has(n.id)) {
+            void saveEncryptedDraft(
+              user.id,
+              n.id,
+              extractNoteMetadata(n),
+              n.content,
+              n.version,
+              encryptionKey
+            );
+          }
+        }
+        clearCachedUserKey(user.id);
+      }
+      clearInMemoryKey();
+      setEncryptionKey(null);
+      setSerializedKey("");
+      setNotes([]);
+      setTrashedNotes([]);
+      setOpenTabIds([]);
+      setActiveNoteId(null);
+      setSplitNoteId(null);
+      setPaletteOpen(false);
+      setSettingsOpen(false);
+      setBackupOpen(false);
+      setScannerOpen(false);
+      setHistoryOpen(false);
+      setLockNotice(reason || "");
+      setPhase("locked");
+    },
+    [user, encryptionKey]
+  );
+
+  // Idle Auto-Lock monitor (locks vault after configured minutes of inactivity)
+  useEffect(() => {
+    const idleMins = settings.idleLockMinutes ?? 0;
+    if (phase !== "ready" || idleMins <= 0) return;
+
+    lastActivityAtRef.current = Date.now();
+    let lastTouch = Date.now();
+    const markActive = () => {
+      const now = Date.now();
+      if (now - lastTouch > 5000) {
+        lastTouch = now;
+        lastActivityAtRef.current = now;
+      }
+    };
+
+    const events: (keyof WindowEventMap)[] = [
+      "mousemove",
+      "keydown",
+      "mousedown",
+      "touchstart",
+      "scroll",
+    ];
+    for (const ev of events) {
+      window.addEventListener(ev, markActive, { passive: true });
+    }
+
+    const interval = setInterval(() => {
+      if (Date.now() - lastActivityAtRef.current >= idleMins * 60 * 1000) {
+        handleLockNow(`Vault auto-locked after ${idleMins} minutes of inactivity.`);
+      }
+    }, 15_000);
+
+    return () => {
+      for (const ev of events) {
+        window.removeEventListener(ev, markActive);
+      }
+      clearInterval(interval);
+    };
+  }, [phase, settings.idleLockMinutes, handleLockNow]);
 
   const handleChangeMasterPassword = async (currentPwd: string, newPwd: string) => {
     if (!user) throw new Error("Not signed in");
@@ -903,8 +1446,10 @@ export default function VaultWorkspace() {
     const newKdfSalt = generateSaltBase64();
     const nextDerived = await deriveUserKeys(newPwd, newKdfSalt);
 
+    // Re-encrypt BOTH active notes and trashed notes so Trash remains readable under the new key
+    const allVaultNotes = [...notes, ...trashedNotes];
     const reencryptedNotes = await Promise.all(
-      notes.map(async (n) => {
+      allVaultNotes.map(async (n) => {
         const enc = await encryptNotePayload(
           extractNoteMetadata(n),
           n.content,
@@ -939,6 +1484,7 @@ export default function VaultWorkspace() {
     // Bump versions locally and refresh clean snapshots
     const bumped = notes.map((n) => ({ ...n, version: n.version + 1 }));
     setNotes(bumped);
+    setTrashedNotes((prev) => prev.map((n) => ({ ...n, version: n.version + 1 })));
     const snapMap = new Map<string, string>();
     for (const n of bumped) snapMap.set(n.id, serializeNoteForDiff(n));
     setSavedSnapshots(snapMap);
@@ -963,6 +1509,14 @@ export default function VaultWorkspace() {
     router.replace("/");
   };
 
+  const cycleMarkdownPreview = useCallback(() => {
+    setMdPreviewMode((cur) => {
+      if (cur === "edit") return "split";
+      if (cur === "split") return "preview";
+      return "edit";
+    });
+  }, []);
+
   // Global Keyboard Shortcuts
   useEffect(() => {
     if (phase !== "ready") return;
@@ -970,6 +1524,28 @@ export default function VaultWorkspace() {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
 
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        handleLockNow("Vault locked.");
+        return;
+      }
+      if (e.altKey && !mod && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        void handleToggleSplit();
+        return;
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === "m") {
+        if (activeNote?.language === "markdown") {
+          e.preventDefault();
+          cycleMarkdownPreview();
+        }
+        return;
+      }
       if (mod && e.shiftKey && e.key.toLowerCase() === "s") {
         e.preventDefault();
         void handleSaveAll();
@@ -1026,7 +1602,108 @@ export default function VaultWorkspace() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [phase, handleSaveActive, handleSaveAll, cursorStats.line]);
+  }, [
+    phase,
+    handleSaveActive,
+    handleSaveAll,
+    handleLockNow,
+    cycleMarkdownPreview,
+    activeNote?.language,
+    cursorStats.line,
+  ]);
+
+  const paletteCommands = useMemo<PaletteCommand[]>(() => {
+    const cmds: PaletteCommand[] = [
+      {
+        id: "new-note",
+        label: "New Note",
+        hint: "Create encrypted note",
+        icon: "new",
+        run: () => void createNoteOnServer(),
+      },
+      {
+        id: "sync-now",
+        label: "Sync with Cloud",
+        hint: "Pull updates from other devices",
+        icon: "sync",
+        run: () => void syncWithCloud({ silent: false }),
+      },
+      {
+        id: "scanner",
+        label: "Boolean Block Scanner",
+        hint: "Search across all notes (AND / OR / NOT)",
+        shortcut: "⌘⇧F",
+        icon: "scanner",
+        run: () => setScannerOpen(true),
+      },
+      {
+        id: "split-view",
+        label: splitNoteId ? "Close Split View" : "Toggle Dual Split View",
+        shortcut: "Alt+V",
+        icon: "split",
+        run: () => void handleToggleSplit(),
+      },
+      {
+        id: "toggle-sidebar",
+        label: sidebarOpen ? "Hide Sidebar" : "Show Sidebar",
+        shortcut: "⌘B",
+        icon: "sidebar",
+        run: () => setSidebarOpen((v) => !v),
+      },
+      {
+        id: "history",
+        label: "Time Machine (Revision History)",
+        hint: "Last 10 encrypted saves",
+        icon: "history",
+        run: () => {
+          if (focusedNote) setHistoryOpen(true);
+        },
+      },
+      {
+        id: "backup",
+        label: "Backup & Restore Vault",
+        hint: "Encrypted .enc.json export & restore",
+        icon: "backup",
+        run: () => setBackupOpen(true),
+      },
+      {
+        id: "lock",
+        label: "Lock Vault Now",
+        hint: "Clear encryption key from memory",
+        shortcut: "⌘⇧L",
+        icon: "lock",
+        run: () => handleLockNow("Vault locked."),
+      },
+      {
+        id: "settings",
+        label: "Settings & Security",
+        hint: "Themes, font, auto-lock, password",
+        icon: "settings",
+        run: () => setSettingsOpen(true),
+      },
+    ];
+
+    if (activeNote?.language === "markdown") {
+      cmds.splice(2, 0, {
+        id: "md-preview",
+        label: "Cycle Markdown Preview (Edit / Split / Preview)",
+        shortcut: "⌘⇧M",
+        icon: "preview",
+        run: cycleMarkdownPreview,
+      });
+    }
+
+    return cmds;
+  }, [
+    createNoteOnServer,
+    syncWithCloud,
+    splitNoteId,
+    sidebarOpen,
+    focusedNote,
+    handleLockNow,
+    activeNote?.language,
+    cycleMarkdownPreview,
+  ]);
 
   useEffect(() => {
     if (!toolsMenuOpen) return;
@@ -1082,8 +1759,8 @@ export default function VaultWorkspace() {
           <div className="space-y-1.5">
             <h1 className="text-xl font-bold text-white">Unlock Your Vault</h1>
             <p className="text-xs text-[#8b949e] leading-relaxed">
-              Your session is active, but your browser encryption key expired. Re-enter your
-              master password to decrypt your notes locally.
+              {lockNotice ||
+                "Your session is active, but your browser encryption key expired. Re-enter your master password to decrypt your notes locally."}
             </p>
           </div>
 
@@ -1125,7 +1802,7 @@ export default function VaultWorkspace() {
           <div className="pt-2 border-t border-[#1f2630] flex items-center justify-between text-[11px] text-[#6e7681]">
             <span className="inline-flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-500/80" />
-              AES-256-GCM
+              End-to-end encrypted
             </span>
             <button
               type="button"
@@ -1153,13 +1830,19 @@ export default function VaultWorkspace() {
     <div
       className="h-screen w-screen flex flex-col bg-[#0b0e14] text-[#e6edf3] overflow-hidden relative"
       onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
+        if (
+          e.dataTransfer.types.includes("Files") &&
+          !e.dataTransfer.types.includes(NOTE_DRAG_MIME)
+        ) {
+          e.preventDefault();
+          setDragOver(true);
+        }
       }}
       onDragLeave={(e) => {
         if (e.currentTarget === e.target) setDragOver(false);
       }}
       onDrop={(e) => {
+        if (e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return;
         e.preventDefault();
         setDragOver(false);
         if (e.dataTransfer.files?.length) {
@@ -1213,25 +1896,66 @@ export default function VaultWorkspace() {
             <span className="font-semibold text-xs text-white hidden sm:inline">SuperPad</span>
           </div>
 
-          <span
-            className={`text-[11px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
-              isAnySaving
+          <button
+            type="button"
+            onClick={() => void syncWithCloud({ silent: false })}
+            disabled={syncingCloud}
+            title="Click to sync with cloud now (auto-syncs when returning to tab)"
+            className={`text-[11px] px-2 py-0.5 rounded-full font-medium shrink-0 inline-flex items-center gap-1 transition-colors cursor-pointer ${
+              isAnySaving || syncingCloud
                 ? "bg-sky-500/20 text-sky-300"
                 : dirtyNoteIds.size > 0
-                  ? "bg-amber-500/20 text-amber-300"
-                  : "bg-emerald-500/15 text-emerald-400"
+                  ? "bg-amber-500/20 text-amber-300 hover:bg-amber-500/30"
+                  : "bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25"
             }`}
           >
-            {isAnySaving
-              ? "Syncing..."
-              : dirtyNoteIds.size > 0
-                ? `${dirtyNoteIds.size} Unsaved`
-                : "Synced"}
-          </span>
+            <RefreshCw className={`w-2.5 h-2.5 ${syncingCloud ? "animate-spin" : ""}`} />
+            <span>
+              {isAnySaving || syncingCloud
+                ? "Syncing..."
+                : dirtyNoteIds.size > 0
+                  ? `${dirtyNoteIds.size} Unsaved`
+                  : "Synced"}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            title="Quick Switcher & Command Palette (Cmd/Ctrl+K)"
+            className="hidden md:inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-[#0e1218] hover:bg-[#1b222c] border border-[#262e3a] text-[11px] text-[#8b949e] hover:text-white transition-colors cursor-pointer"
+          >
+            <Command className="w-3 h-3" />
+            <span>Quick jump</span>
+            <kbd className="text-[10px] font-mono px-1 rounded bg-[#161b22] text-[#6e7681]">⌘K</kbd>
+          </button>
         </div>
 
         {/* Right: Power Actions */}
         <div className="flex items-center gap-1">
+          {activeNote?.language === "markdown" && !splitNote ? (
+            <div
+              className="inline-flex items-center rounded-md bg-[#0e1218] border border-[#262e3a] p-0.5 text-[11px]"
+              title="Markdown View Mode (Cmd/Ctrl+Shift+M)"
+            >
+              {(["edit", "split", "preview"] as MarkdownPreviewMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setMdPreviewMode(mode)}
+                  className={`px-2 py-0.5 rounded capitalize transition-colors cursor-pointer inline-flex items-center gap-1 ${
+                    mdPreviewMode === mode
+                      ? "bg-sky-500/20 text-sky-300 font-medium"
+                      : "text-[#8b949e] hover:text-white"
+                  }`}
+                >
+                  {mode === "preview" ? <Eye className="w-3 h-3" /> : null}
+                  <span>{mode}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
           <button
             type="button"
             onClick={() => {
@@ -1445,13 +2169,24 @@ export default function VaultWorkspace() {
                 <button
                   type="button"
                   onClick={() => {
+                    setBackupOpen(true);
+                    setToolsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center gap-2 cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Backup &amp; Restore Vault...</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     handleExportAllBackup();
                     setToolsMenuOpen(false);
                   }}
                   className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center gap-2 cursor-pointer"
                 >
                   <FilePlus className="w-3.5 h-3.5 text-violet-400" />
-                  <span>Export All Notes (.json)</span>
+                  <span>Quick Export JSON (Plaintext)</span>
                 </button>
               </div>
             ) : null}
@@ -1516,19 +2251,31 @@ export default function VaultWorkspace() {
           open={sidebarOpen}
           username={user.username}
           notes={notes}
+          trashedNotes={trashedNotes}
           activeNoteId={activeNoteId}
           dirtyNoteIds={dirtyNoteIds}
           extraFolders={extraFolders}
+          collapsedFolders={collapsedFolders}
           totalBytes={totalAccountBytes}
           onSelectNote={handleSelectNote}
           onCreateNote={(folder) => void createNoteOnServer(undefined, "", folder ?? "")}
           onCreateFolder={handleCreateFolder}
+          onRenameFolder={handleRenameFolder}
           onDeleteFolder={handleDeleteFolder}
+          onToggleFolder={handleToggleFolder}
           onRenameNote={handleRenameNote}
           onMoveNoteToFolder={handleMoveNoteToFolder}
           onTogglePinNote={handleTogglePinNote}
           onDeleteNote={(id) => void handleDeleteNote(id)}
+          onRestoreNote={(id) => void handleRestoreNote(id)}
+          onPermanentDeleteNote={(id) => void handlePermanentDeleteNote(id)}
+          onEmptyTrash={() => void handleEmptyTrash()}
           onTriggerImport={() => fileInputRef.current?.click()}
+          onCloseMobile={() => {
+            if (typeof window !== "undefined" && window.innerWidth < 768) {
+              setSidebarOpen(false);
+            }
+          }}
         />
 
         {/* Right Side: Tab Bar + Conflict Banner + Editor Panes */}
@@ -1726,38 +2473,66 @@ export default function VaultWorkspace() {
               </div>
             ) : (
               <>
-                <div
-                  className={`flex-1 flex flex-col min-w-0 h-full ${
-                    splitNote ? "border-r border-[#262e3a]" : ""
-                  }`}
-                >
-                  <CodeEditor
-                    ref={primaryEditorRef}
-                    tabId={activeNote.id}
-                    content={activeNote.content}
-                    language={activeNote.language}
-                    wordWrap={activeNote.wordWrap}
-                    bookmarks={activeNote.bookmarks}
-                    theme={settings.theme}
-                    fontSize={settings.fontSize}
-                    tabSize={settings.tabSize}
-                    showLineNumbers={settings.showLineNumbers}
-                    onChange={(next) =>
-                      updateLocalNote(activeNote.id, (n) => ({
-                        ...n,
-                        content: next,
-                        sizeBytes: new TextEncoder().encode(next).length,
-                      }))
-                    }
-                    onBookmarksChange={(nextBm) =>
-                      updateLocalNote(activeNote.id, (n) => ({ ...n, bookmarks: nextBm }))
-                    }
-                    onCursorChange={(stats) => {
-                      if (focusedPane === "primary") setCursorStats(stats);
-                    }}
-                    onFocusPane={() => setFocusedPane("primary")}
-                  />
-                </div>
+                {!(activeNote.language === "markdown" && !splitNote && mdPreviewMode === "preview") ? (
+                  <div
+                    className={`flex-1 flex flex-col min-w-0 h-full ${
+                      splitNote || (activeNote.language === "markdown" && mdPreviewMode === "split")
+                        ? "border-r border-[#262e3a]"
+                        : ""
+                    }`}
+                  >
+                    <CodeEditor
+                      ref={primaryEditorRef}
+                      tabId={activeNote.id}
+                      content={activeNote.content}
+                      language={activeNote.language}
+                      wordWrap={activeNote.wordWrap}
+                      bookmarks={activeNote.bookmarks}
+                      theme={settings.theme}
+                      fontSize={settings.fontSize}
+                      tabSize={settings.tabSize}
+                      showLineNumbers={settings.showLineNumbers}
+                      onChange={(next) =>
+                        updateLocalNote(activeNote.id, (n) => ({
+                          ...n,
+                          content: next,
+                          sizeBytes: new TextEncoder().encode(next).length,
+                        }))
+                      }
+                      onBookmarksChange={(nextBm) =>
+                        updateLocalNote(activeNote.id, (n) => ({ ...n, bookmarks: nextBm }))
+                      }
+                      onCursorChange={(stats) => {
+                        if (focusedPane === "primary") setCursorStats(stats);
+                      }}
+                      onFocusPane={() => setFocusedPane("primary")}
+                    />
+                  </div>
+                ) : null}
+
+                {activeNote.language === "markdown" && !splitNote && mdPreviewMode !== "edit" ? (
+                  <div className="flex-1 flex flex-col min-w-0 h-full">
+                    <div className="h-8 px-3 bg-[#11161e] border-b border-[#21262d] flex items-center justify-between text-xs shrink-0">
+                      <span className="text-[10px] uppercase tracking-wider text-sky-400 font-semibold inline-flex items-center gap-1.5">
+                        <Eye className="w-3 h-3" />
+                        Markdown Preview
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setMdPreviewMode("edit")}
+                        className="text-[11px] text-[#8b949e] hover:text-white cursor-pointer"
+                      >
+                        Close Preview
+                      </button>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      <MarkdownPreview
+                        content={activeNote.content}
+                        onToggleCheckbox={handleToggleMarkdownCheckbox}
+                      />
+                    </div>
+                  </div>
+                ) : null}
 
                 {splitNote ? (
                   <div className="flex-1 flex flex-col min-w-0 h-full">
@@ -2026,6 +2801,28 @@ export default function VaultWorkspace() {
         onClose={() => setHistoryOpen(false)}
       />
 
+      {/* Quick Switcher & Command Palette (Cmd/Ctrl+K) */}
+      <CommandPalette
+        open={paletteOpen}
+        notes={notes}
+        activeNoteId={activeNoteId}
+        dirtyNoteIds={dirtyNoteIds}
+        commands={paletteCommands}
+        onSelectNote={handleSelectNote}
+        onCreateNoteWithTitle={(title) => void createNoteOnServer(title, "")}
+        onClose={() => setPaletteOpen(false)}
+      />
+
+      {/* Encrypted Backup & Restore Modal */}
+      <BackupModal
+        open={backupOpen}
+        username={user.username}
+        notes={notes}
+        extraFolders={extraFolders}
+        onRestoreBackup={handleRestoreBackup}
+        onClose={() => setBackupOpen(false)}
+      />
+
       {/* Settings & Security Modal */}
       <SettingsModal
         open={settingsOpen}
@@ -2033,16 +2830,17 @@ export default function VaultWorkspace() {
         settings={settings}
         onUpdateSettings={handleUpdateSettings}
         onChangePassword={handleChangeMasterPassword}
-        onLockNow={handleLockNow}
+        onOpenBackup={() => setBackupOpen(true)}
+        onLockNow={() => handleLockNow("Vault locked.")}
         onSignOut={handleSignOut}
         onDeleteAccount={handleDeleteAccount}
         onClose={() => setSettingsOpen(false)}
       />
 
-      {/* Toast Notification */}
+      {/* Toast Notification (supports Undo action) */}
       {toast ? (
         <div
-          className={`fixed bottom-10 right-4 z-50 px-3.5 py-2 rounded-lg text-xs font-medium shadow-xl border backdrop-blur-md transition-all ${
+          className={`fixed bottom-10 right-4 z-50 px-3.5 py-2 rounded-lg text-xs font-medium shadow-xl border backdrop-blur-md transition-all inline-flex items-center gap-3 ${
             toast.type === "error"
               ? "bg-rose-950/90 border-rose-500/50 text-rose-200"
               : toast.type === "success"
@@ -2050,7 +2848,20 @@ export default function VaultWorkspace() {
                 : "bg-[#161b22]/95 border-[#30363d] text-[#e6edf3]"
           }`}
         >
-          {toast.msg}
+          <span>{toast.msg}</span>
+          {toast.actionLabel && toast.onAction ? (
+            <button
+              type="button"
+              onClick={() => {
+                const fn = toast.onAction;
+                setToast(null);
+                fn?.();
+              }}
+              className="px-2 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-500/40 font-semibold cursor-pointer"
+            >
+              {toast.actionLabel}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

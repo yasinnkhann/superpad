@@ -9,14 +9,31 @@ import {
   validateBase64String,
   validateUsername,
 } from "@/lib/auth";
+import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
+
+const REGISTER_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const REGISTER_IP_LIMIT = 8;
 
 export async function POST(request: Request) {
   const startedAt = performance.now();
   const backend = getDbBackend();
 
   try {
+    const ip = getClientIp(request);
+    const ipCheck = await checkRateLimit(`register:ip:${ip}`, REGISTER_IP_LIMIT, REGISTER_WINDOW_MS);
+    if (!ipCheck.allowed) {
+      metric("superpad.auth.register", 1, { outcome: "rate_limited", backend });
+      return NextResponse.json(
+        { error: `Too many registration attempts. Try again in ${ipCheck.retryAfterSeconds}s.` },
+        {
+          status: 429,
+          headers: { "Retry-After": String(ipCheck.retryAfterSeconds) },
+        }
+      );
+    }
+
     const body = (await request.json()) as {
       username?: unknown;
       kdfSalt?: unknown;
