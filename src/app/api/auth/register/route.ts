@@ -75,7 +75,7 @@ export async function POST(request: Request) {
       await tx.rollback();
       const msg = err instanceof Error ? err.message : "";
       if (msg.includes("UNIQUE") || msg.includes("unique")) {
-        metric("zeropad.auth.register", 1, { outcome: "conflict", backend });
+        metric("superpad.auth.register", 1, { outcome: "conflict", backend });
         return NextResponse.json(
           { error: "That username is already taken. Try another handle." },
           { status: 409 }
@@ -96,14 +96,14 @@ export async function POST(request: Request) {
     });
     attachSessionCookie(response, session.token, session.expiresAt);
 
-    metric("zeropad.auth.register", 1, { outcome: "success", backend });
+    metric("superpad.auth.register", 1, { outcome: "success", backend });
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Registration failed";
     const status = message.includes("Invalid") || message.includes("Username") ? 400 : 500;
-    metric("zeropad.auth.register", 1, { outcome: "error", backend });
+    metric("superpad.auth.register", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status });
   } finally {
-    metric("zeropad.auth.register.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.auth.register.duration_ms", performance.now() - startedAt, { backend });
   }
 }

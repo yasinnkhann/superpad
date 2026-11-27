@@ -37,16 +37,16 @@ export async function GET(
       createdAt: Number(r.created_at),
     }));
 
-    metric("zeropad.notes.revisions", 1, { outcome: "success", backend });
+    metric("superpad.notes.revisions", 1, { outcome: "success", backend });
     return NextResponse.json(
       { revisions },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load revisions";
-    metric("zeropad.notes.revisions", 1, { outcome: "error", backend });
+    metric("superpad.notes.revisions", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status: 500 });
   } finally {
-    metric("zeropad.notes.revisions.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.notes.revisions.duration_ms", performance.now() - startedAt, { backend });
   }
 }

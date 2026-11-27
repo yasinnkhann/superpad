@@ -10,6 +10,12 @@ export function getDbBackend(): "turso" | "local-sqlite" {
 }
 
 function resolveDatabaseConfig(): { url: string; authToken?: string } {
+  if (process.env.SUPERPAD_DB_URL) {
+    return {
+      url: process.env.SUPERPAD_DB_URL,
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    };
+  }
   if (process.env.ZEROPAD_DB_URL) {
     return {
       url: process.env.ZEROPAD_DB_URL,
@@ -22,10 +28,10 @@ function resolveDatabaseConfig(): { url: string; authToken?: string } {
       authToken: process.env.TURSO_AUTH_TOKEN,
     };
   }
-  const dataDir = path.join(process.cwd(), ".zeropad-data");
+  const dataDir = path.join(process.cwd(), ".superpad-data");
   fs.mkdirSync(dataDir, { recursive: true });
   return {
-    url: `file:${path.join(dataDir, "zeropad.db")}`,
+    url: `file:${path.join(dataDir, "superpad.db")}`,
   };
 }
 

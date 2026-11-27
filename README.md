@@ -1,6 +1,8 @@
-# ZeroPad
+# SuperPad
 
 **Zero-knowledge Notepad++ for the Web — powered by Turso (libSQL / SQLite).**
+
+🚀 **Live App:** [https://superpad.vercel.app](https://superpad.vercel.app)
 
 Sign in with an anonymous handle and master password (no email, no OAuth) to manage all your end-to-end encrypted folders, notes, and code tabs across every device.
 
@@ -16,7 +18,7 @@ Sign in with an anonymous handle and master password (no email, no OAuth) to man
 - **Turso (libSQL / SQLite) Backend:**
   - Free tier gives **5 GB storage, 500M reads/mo, and 10M writes/mo** (no inactivity pausing).
   - Atomic `UNIQUE(username)` accounts, optimistic concurrency (`version` checks → `409 Conflict` resolution across devices), and **10 rolling encrypted backups per note**.
-  - **Zero-config local dev:** Automatically opens a local SQLite database (`./.zeropad-data/zeropad.db`) when `TURSO_DATABASE_URL` is unset.
+  - **Zero-config local dev:** Automatically opens a local SQLite database (`./.superpad-data/superpad.db`) when `TURSO_DATABASE_URL` is unset.
 - **Notepad++ Crash Recovery:** Unsaved edits are automatically encrypted and persisted to local browser **IndexedDB** every second so a browser crash or reboot never loses typing.
 
 ---

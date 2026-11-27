@@ -57,7 +57,7 @@ function sanitizeUsername(val: string): string {
     .slice(0, 32);
 }
 
-const WELCOME_CONTENT = `# Welcome to ZeroPad
+const WELCOME_CONTENT = `# Welcome to SuperPad
 
 Your account and every note inside it are end-to-end encrypted in your browser
 with AES-256-GCM before syncing to Turso.
@@ -216,7 +216,7 @@ export default function HomePage() {
     return (
       <div className="h-screen w-screen bg-[#0b0e14] flex flex-col items-center justify-center gap-3 text-[#8b949e]">
         <Loader2 className="w-6 h-6 animate-spin text-emerald-400" />
-        <p className="text-xs font-mono">Loading ZeroPad...</p>
+        <p className="text-xs font-mono">Loading SuperPad...</p>
       </div>
     );
   }
@@ -231,7 +231,7 @@ export default function HomePage() {
               <Lock className="w-3.5 h-3.5 text-[#0b0e14] stroke-[2.5]" />
             </div>
             <span className="font-semibold tracking-tight text-[15px] text-white">
-              ZeroPad
+              SuperPad
             </span>
             <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
               v2 • Turso

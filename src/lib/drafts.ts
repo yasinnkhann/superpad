@@ -2,7 +2,7 @@ import type { NoteMetadata } from "@/types/vault";
 import { decryptWithKey, encryptWithKey } from "@/lib/crypto";
 import { normalizeNoteMetadata } from "@/types/vault";
 
-const DB_NAME = "zeropad_crash_recovery_v1";
+const DB_NAME = "superpad_crash_recovery_v1";
 const STORE_NAME = "drafts";
 
 interface StoredEncryptedDraft {

@@ -124,7 +124,7 @@ async function runE2E() {
   const PORT = 4321;
   const BASE_URL = `http://localhost:${PORT}`;
   console.log(bold(cyan("\n=======================================================")));
-  console.log(bold(cyan("   ZeroPad Full Live End-to-End Test (Turso Cloud)   ")));
+  console.log(bold(cyan("   SuperPad Full Live End-to-End Test (Turso Cloud)  ")));
   console.log(bold(cyan("=======================================================\n")));
 
   console.log(dim(`Connecting to Turso: ${process.env.TURSO_DATABASE_URL}`));
@@ -201,7 +201,7 @@ async function runE2E() {
       const res = await fetch(`${BASE_URL}${endpoint}`, { ...options, headers });
       const rawCookie = res.headers.get("set-cookie");
       if (rawCookie) {
-        const m = rawCookie.match(/zeropad_session=[^;]+/);
+        const m = rawCookie.match(/(?:superpad|zeropad)_session=[^;]+/);
         if (m) sessionCookie = m[0];
       }
       return res;
@@ -291,7 +291,7 @@ async function runE2E() {
       wordWrap: true,
       bookmarks: [5, 12],
       pinned: true,
-      content: "# ZeroPad Architecture\n\nZero-knowledge text editor using libSQL / Turso cloud storage.\n\nAll cryptographic operations run client-side via WebCrypto.",
+      content: "# SuperPad Architecture\n\nZero-knowledge text editor using libSQL / Turso cloud storage.\n\nAll cryptographic operations run client-side via WebCrypto.",
     };
 
     const note2Plain = {
@@ -442,14 +442,14 @@ async function runE2E() {
     console.log(bold("\n[5/7] Boolean Block Scanner Engine"));
 
     await runStep("Runs multi-criteria paragraph queries across decrypted notes", async () => {
-      const p1 = "ZeroPad Architecture\nZero-knowledge text editor using libSQL / Turso cloud storage.";
+      const p1 = "SuperPad Architecture\nZero-knowledge text editor using libSQL / Turso cloud storage.";
       const p2 = "All cryptographic operations run client-side via WebCrypto.";
       const p3 = "cluster: turso-primary\nsync: true";
       const blocks = [p1, p2, p3];
 
-      // Query A: Must include 'zeropad' AND 'turso', NOT 'sync'
+      // Query A: Must include 'superpad' AND 'turso', NOT 'sync'
       const matchA = testScanner(blocks, {
-        mustInclude: ["zeropad", "turso"],
+        mustInclude: ["superpad", "turso"],
         mustNotInclude: ["sync"],
       });
       if (matchA.length !== 1 || !matchA[0].includes("Architecture")) {

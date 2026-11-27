@@ -33,7 +33,7 @@ export async function POST(request: Request) {
 
     const row = res.rows[0];
     if (!row) {
-      metric("zeropad.auth.login", 1, { outcome: "invalid", backend });
+      metric("superpad.auth.login", 1, { outcome: "invalid", backend });
       return NextResponse.json(
         { error: "Invalid username or password." },
         { status: 401 }
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       String(row.auth_verifier)
     );
     if (!ok) {
-      metric("zeropad.auth.login", 1, { outcome: "invalid", backend });
+      metric("superpad.auth.login", 1, { outcome: "invalid", backend });
       return NextResponse.json(
         { error: "Invalid username or password." },
         { status: 401 }
@@ -66,14 +66,14 @@ export async function POST(request: Request) {
     });
     attachSessionCookie(response, session.token, session.expiresAt);
 
-    metric("zeropad.auth.login", 1, { outcome: "success", backend });
+    metric("superpad.auth.login", 1, { outcome: "success", backend });
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Login failed";
     const status = message.includes("Invalid") || message.includes("Username") ? 400 : 500;
-    metric("zeropad.auth.login", 1, { outcome: "error", backend });
+    metric("superpad.auth.login", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status });
   } finally {
-    metric("zeropad.auth.login.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.auth.login.duration_ms", performance.now() - startedAt, { backend });
   }
 }

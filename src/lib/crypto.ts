@@ -183,8 +183,8 @@ export async function decryptNoteDTO(
 // Versioned Local Key Cache & UI Settings
 // ==========================================
 
-const KEY_CACHE_PREFIX = "zeropad:v2:key:";
-const SETTINGS_KEY = "zeropad:v2:settings";
+const KEY_CACHE_PREFIX = "superpad:v2:key:";
+const SETTINGS_KEY = "superpad:v2:settings";
 
 interface CachedKeyPayload {
   serializedKey: string;

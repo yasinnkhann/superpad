@@ -4,7 +4,7 @@ import type { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import type { AuthUser } from "@/types/vault";
 
-export const SESSION_COOKIE_NAME = "zeropad_session";
+export const SESSION_COOKIE_NAME = "superpad_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const USERNAME_REGEX = /^[a-z0-9_-]{3,32}$/;
 const MAX_NOTE_PAYLOAD_BYTES = 12 * 1024 * 1024; // 12 MB encrypted per note
@@ -71,7 +71,7 @@ export function verifyAuthKey(
  * `/api/auth/challenge` never reveals whether a username is registered.
  */
 export function generateDecoySalt(username: string): string {
-  const pepper = process.env.AUTH_PEPPER || "zeropad-default-decoy-pepper-v2";
+  const pepper = process.env.AUTH_PEPPER || "superpad-default-decoy-pepper-v2";
   const digest = crypto
     .createHmac("sha256", pepper)
     .update(`decoy:${username}`)
@@ -152,7 +152,9 @@ export async function getAuthenticatedUserFromToken(token: string | undefined): 
 
 export async function getAuthenticatedUser(): Promise<AuthUser | null> {
   const cookieStore = await cookies();
-  const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+  const token =
+    cookieStore.get(SESSION_COOKIE_NAME)?.value ||
+    cookieStore.get("zeropad_session")?.value;
   return getAuthenticatedUserFromToken(token);
 }
 

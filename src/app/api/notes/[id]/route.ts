@@ -102,7 +102,7 @@ export async function PUT(
       const currentVersion = Number(existing.version);
       if (!force && expectedVersion !== null && currentVersion !== expectedVersion) {
         await tx.rollback();
-        metric("zeropad.notes.update", 1, { outcome: "conflict", backend });
+        metric("superpad.notes.update", 1, { outcome: "conflict", backend });
         return NextResponse.json(
           {
             error: "This note was modified on another device.",
@@ -161,8 +161,8 @@ export async function PUT(
         updatedAt: now,
       };
 
-      metric("zeropad.notes.update", 1, { outcome: "success", backend });
-      metric("zeropad.notes.update.bytes", sizeBytes, { backend });
+      metric("superpad.notes.update", 1, { outcome: "success", backend });
+      metric("superpad.notes.update.bytes", sizeBytes, { backend });
       return NextResponse.json({ note: updated });
     } catch (err) {
       await tx.rollback();
@@ -171,10 +171,10 @@ export async function PUT(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save note";
     const status = message.includes("Invalid") || message.includes("exceeds") ? 400 : 500;
-    metric("zeropad.notes.update", 1, { outcome: "error", backend });
+    metric("superpad.notes.update", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status });
   } finally {
-    metric("zeropad.notes.update.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.notes.update.duration_ms", performance.now() - startedAt, { backend });
   }
 }
 
@@ -202,13 +202,13 @@ export async function DELETE(
       return NextResponse.json({ error: "Note not found" }, { status: 404 });
     }
 
-    metric("zeropad.notes.delete", 1, { outcome: "success", backend });
+    metric("superpad.notes.delete", 1, { outcome: "success", backend });
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to delete note";
-    metric("zeropad.notes.delete", 1, { outcome: "error", backend });
+    metric("superpad.notes.delete", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status: 500 });
   } finally {
-    metric("zeropad.notes.delete.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.notes.delete.duration_ms", performance.now() - startedAt, { backend });
   }
 }

@@ -252,7 +252,7 @@ export default function FileSidebar({
           >
             <input
               type="text"
-              list="zeropad-folder-list"
+              list="superpad-folder-list"
               value={moveFolderText}
               onChange={(e) => setMoveFolderText(e.target.value)}
               placeholder="Folder (empty = root)"
@@ -276,7 +276,7 @@ export default function FileSidebar({
 
   return (
     <aside className="w-60 sm:w-64 shrink-0 bg-[#0e1218] border-r border-[#21262d] flex flex-col select-none">
-      <datalist id="zeropad-folder-list">
+      <datalist id="superpad-folder-list">
         {allFolderNames.map((f) => (
           <option key={f} value={f} />
         ))}

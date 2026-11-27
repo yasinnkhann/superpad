@@ -41,17 +41,17 @@ export async function GET() {
     const notes = res.rows.map((r) => mapNoteRow(r as unknown as Record<string, unknown>));
     const totalBytes = notes.reduce((acc, n) => acc + n.sizeBytes, 0);
 
-    metric("zeropad.notes.list", 1, { outcome: "success", backend });
+    metric("superpad.notes.list", 1, { outcome: "success", backend });
     return NextResponse.json(
       { notes, totalBytes, backend },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to list notes";
-    metric("zeropad.notes.list", 1, { outcome: "error", backend });
+    metric("superpad.notes.list", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status: 500 });
   } finally {
-    metric("zeropad.notes.list.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.notes.list.duration_ms", performance.now() - startedAt, { backend });
   }
 }
 
@@ -114,14 +114,14 @@ export async function POST(request: Request) {
       updatedAt: now,
     };
 
-    metric("zeropad.notes.create", 1, { outcome: "success", backend });
+    metric("superpad.notes.create", 1, { outcome: "success", backend });
     return NextResponse.json({ note }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create note";
     const status = message.includes("Invalid") || message.includes("exceeds") ? 400 : 500;
-    metric("zeropad.notes.create", 1, { outcome: "error", backend });
+    metric("superpad.notes.create", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status });
   } finally {
-    metric("zeropad.notes.create.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.notes.create.duration_ms", performance.now() - startedAt, { backend });
   }
 }

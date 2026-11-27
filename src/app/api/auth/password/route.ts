@@ -50,7 +50,7 @@ export async function POST(request: Request) {
       !row ||
       !verifyAuthKey(currentAuthKey, String(row.auth_salt), String(row.auth_verifier))
     ) {
-      metric("zeropad.auth.password_change", 1, { outcome: "invalid", backend });
+      metric("superpad.auth.password_change", 1, { outcome: "invalid", backend });
       return NextResponse.json({ error: "Current password is incorrect." }, { status: 401 });
     }
 
@@ -101,13 +101,13 @@ export async function POST(request: Request) {
       throw err;
     }
 
-    metric("zeropad.auth.password_change", 1, { outcome: "success", backend });
+    metric("superpad.auth.password_change", 1, { outcome: "success", backend });
     return NextResponse.json({ success: true, kdfSalt: newKdfSalt });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Password update failed";
-    metric("zeropad.auth.password_change", 1, { outcome: "error", backend });
+    metric("superpad.auth.password_change", 1, { outcome: "error", backend });
     return NextResponse.json({ error: message }, { status: 500 });
   } finally {
-    metric("zeropad.auth.password_change.duration_ms", performance.now() - startedAt, { backend });
+    metric("superpad.auth.password_change.duration_ms", performance.now() - startedAt, { backend });
   }
 }

@@ -28,7 +28,9 @@ pnpm-debug.log*
 
 # local dev encrypted vault store
 /.zeropad-data
+/.superpad-data
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+.env*

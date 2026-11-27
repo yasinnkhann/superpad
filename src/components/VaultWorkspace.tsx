@@ -743,7 +743,7 @@ export default function VaultWorkspace() {
   const handleExportAllBackup = () => {
     const stamp = new Date().toISOString().slice(0, 10);
     downloadFile(
-      `zeropad-${user?.username ?? "backup"}-${stamp}.json`,
+      `superpad-${user?.username ?? "backup"}-${stamp}.json`,
       JSON.stringify({ exportedAt: new Date().toISOString(), notes }, null, 2),
       "application/json"
     );
@@ -994,7 +994,7 @@ export default function VaultWorkspace() {
           <div className="flex items-center justify-between">
             <div className="inline-flex items-center gap-2 text-xs text-white font-semibold">
               <Lock className="w-3.5 h-3.5 text-emerald-400" />
-              <span>ZeroPad</span>
+              <span>SuperPad</span>
             </div>
             <span className="text-xs font-mono px-2.5 py-1 rounded-full bg-[#1b222c] text-emerald-400 border border-emerald-500/20">
               @{user.username}
@@ -1130,9 +1130,9 @@ export default function VaultWorkspace() {
 
           <div className="flex items-center gap-1.5 shrink-0">
             <div className="w-5 h-5 rounded bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center">
-              <Lock className="w-3 h-3 text-[#0b0e14] stroke-[2.5]" />
+              <Lock className="w-3.5 h-3.5 text-[#0b0e14] stroke-[2.5]" />
             </div>
-            <span className="font-semibold text-xs text-white hidden sm:inline">ZeroPad</span>
+            <span className="font-semibold text-xs text-white hidden sm:inline">SuperPad</span>
           </div>
 
           <span

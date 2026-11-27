@@ -32,7 +32,7 @@ import {
 import { getDb, resetDbClientForTests } from "@/lib/db";
 import type { NoteRecord } from "@/types/vault";
 
-describe("ZeroPad Split-Key Crypto Engine", () => {
+describe("SuperPad Split-Key Crypto Engine", () => {
   it("derives independent authKey and encryptionKey from password + salt", async () => {
     const salt = generateSaltBase64();
     const keysA = await deriveUserKeys("my-strong-password", salt);
@@ -49,7 +49,7 @@ describe("ZeroPad Split-Key Crypto Engine", () => {
     const salt = generateSaltBase64();
     const derived = await deriveUserKeys("vault-secret-123", salt);
 
-    const bigBody = "ZeroPad line entry https://example.com\n".repeat(13_000);
+    const bigBody = "SuperPad line entry https://example.com\n".repeat(13_000);
     expect(bigBody.length).toBeGreaterThan(500_000);
 
     const enc = await encryptNotePayload(
@@ -66,7 +66,7 @@ describe("ZeroPad Split-Key Crypto Engine", () => {
     );
 
     expect(enc.encryptedMeta).not.toContain("introspects");
-    expect(enc.encryptedContent).not.toContain("ZeroPad");
+    expect(enc.encryptedContent).not.toContain("SuperPad");
 
     const reimported = await importRawEncryptionKey(derived.serializedKey);
     const decrypted = await decryptNoteDTO(
@@ -184,7 +184,8 @@ describe("Turso / libSQL Schema & Server Auth", () => {
 
   beforeAll(async () => {
     resetDbClientForTests();
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zeropad-turso-test-"));
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "superpad-turso-test-"));
+    process.env.SUPERPAD_DB_URL = `file:${path.join(tmpDir, "test.db")}`;
     process.env.ZEROPAD_DB_URL = `file:${path.join(tmpDir, "test.db")}`;
     delete process.env.TURSO_DATABASE_URL;
     delete process.env.TURSO_AUTH_TOKEN;
