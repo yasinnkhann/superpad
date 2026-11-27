@@ -20,12 +20,14 @@ import {
   LogOut,
   PanelLeft,
   Plus,
+  Redo2,
   RefreshCw,
   Save,
   Search,
   Settings,
   ShieldCheck,
   Sparkles,
+  Undo2,
   Upload,
   WrapText,
   Wrench,
@@ -1637,6 +1639,36 @@ export default function VaultWorkspace() {
         run: () => setScannerOpen(true),
       },
       {
+        id: "undo",
+        label: "Undo",
+        hint: "Undo last edit or replace",
+        shortcut: "⌘Z",
+        icon: "history",
+        run: () => {
+          const ed = getFocusedEditor();
+          if (ed) {
+            const ok = ed.undo();
+            if (ok) showToast("Undid last action", "info");
+            else showToast("Nothing to undo", "info");
+          }
+        },
+      },
+      {
+        id: "redo",
+        label: "Redo",
+        hint: "Redo last undone edit or replace",
+        shortcut: "⌘⇧Z",
+        icon: "history",
+        run: () => {
+          const ed = getFocusedEditor();
+          if (ed) {
+            const ok = ed.redo();
+            if (ok) showToast("Redid last action", "info");
+            else showToast("Nothing to redo", "info");
+          }
+        },
+      },
+      {
         id: "split-view",
         label: splitNoteId ? "Close Split View" : "Toggle Dual Split View",
         shortcut: "Alt+V",
@@ -2022,6 +2054,48 @@ export default function VaultWorkspace() {
                 onClick={(e) => e.stopPropagation()}
                 className="absolute right-0 mt-1.5 w-60 rounded-xl bg-[#161b22] border border-[#30363d] shadow-2xl shadow-black/70 py-1.5 z-40 text-xs"
               >
+                <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#6e7681]">
+                  Edit History
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ed = getFocusedEditor();
+                    if (ed) {
+                      const ok = ed.undo();
+                      if (ok) showToast("Undid last edit", "info");
+                      else showToast("Nothing to undo", "info");
+                    }
+                    setToolsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center justify-between cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Undo2 className="w-3.5 h-3.5 text-amber-400" />
+                    Undo
+                  </span>
+                  <span className="text-[10px] font-mono text-[#6e7681]">⌘Z</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ed = getFocusedEditor();
+                    if (ed) {
+                      const ok = ed.redo();
+                      if (ok) showToast("Redid last edit", "info");
+                      else showToast("Nothing to redo", "info");
+                    }
+                    setToolsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] text-[#e6edf3] flex items-center justify-between cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Redo2 className="w-3.5 h-3.5 text-sky-400" />
+                    Redo
+                  </span>
+                  <span className="text-[10px] font-mono text-[#6e7681]">⌘⇧Z</span>
+                </button>
+                <hr className="my-1 border-[#262e3a]" />
                 <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#6e7681]">
                   Line Operations
                 </div>
@@ -2452,7 +2526,31 @@ export default function VaultWorkspace() {
                   showToast(res.error, "error");
                 } else {
                   setFindSummary({ total: 0, currentIndex: 0 });
-                  showToast(`Replaced ${res.replaced} occurrence(s) (⌘Z to undo)`, "success");
+                  showToast(`Replaced ${res.replaced} occurrence(s)`, "success", {
+                    label: "Undo",
+                    onAction: () => {
+                      const activeEd = getFocusedEditor();
+                      if (activeEd) {
+                        const ok = activeEd.undo();
+                        if (ok) {
+                          setFindSummary(activeEd.updateSearchHighlights(opts));
+                          showToast("Undid replacement", "info");
+                        }
+                      }
+                    },
+                  });
+                }
+              }}
+              onUndo={(opts) => {
+                const ed = getFocusedEditor();
+                if (ed) {
+                  const ok = ed.undo();
+                  if (ok) {
+                    setFindSummary(ed.updateSearchHighlights(opts));
+                    showToast("Undid replacement", "info");
+                  } else {
+                    showToast("Nothing to undo", "info");
+                  }
                 }
               }}
               onClose={handleFindClose}

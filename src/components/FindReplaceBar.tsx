@@ -9,6 +9,7 @@ import {
   Regex,
   Replace,
   ReplaceAll,
+  Undo2,
   WholeWord,
   X,
 } from "lucide-react";
@@ -22,6 +23,7 @@ interface FindReplaceBarProps {
   onStep: (opts: SearchOptions, dir: "next" | "prev") => void;
   onReplaceOne: (opts: SearchOptions) => void;
   onReplaceAll: (opts: SearchOptions) => void;
+  onUndo?: (opts: SearchOptions) => void;
   onClose: () => void;
 }
 
@@ -33,6 +35,7 @@ export default function FindReplaceBar({
   onStep,
   onReplaceOne,
   onReplaceAll,
+  onUndo,
   onClose,
 }: FindReplaceBarProps) {
   const [query, setQuery] = useState("");
@@ -244,6 +247,17 @@ export default function FindReplaceBar({
                 <ReplaceAll className="w-3 h-3" />
                 <span>All</span>
               </button>
+              {onUndo ? (
+                <button
+                  type="button"
+                  onClick={() => onUndo(currentOpts)}
+                  title="Undo last replace (⌘Z)"
+                  className="px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[11px] inline-flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Undo2 className="w-3 h-3" />
+                  <span>Undo</span>
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>

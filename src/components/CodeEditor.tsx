@@ -37,6 +37,8 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  redo,
+  undo,
 } from "@codemirror/commands";
 import {
   HighlightStyle,
@@ -86,6 +88,8 @@ export interface SearchMatchSummary {
 
 export interface CodeEditorHandle {
   focus: () => void;
+  undo: () => boolean;
+  redo: () => boolean;
   jumpToRange: (start: number, end: number) => void;
   jumpToLine: (lineNumber: number) => void;
   insertAtCursor: (text: string) => void;
@@ -728,6 +732,16 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
     () => ({
       focus() {
         viewRef.current?.focus();
+      },
+      undo(): boolean {
+        const view = viewRef.current;
+        if (!view) return false;
+        return undo(view);
+      },
+      redo(): boolean {
+        const view = viewRef.current;
+        if (!view) return false;
+        return redo(view);
       },
       jumpToRange(start: number, end: number) {
         const view = viewRef.current;
