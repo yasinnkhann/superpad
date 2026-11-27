@@ -248,6 +248,11 @@ export default function FileSidebar({
               onMoveNoteToFolder(note.id, moveFolderText.trim());
               setMovingId(null);
             }}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setMovingId(null);
+              }
+            }}
             className="mx-2 my-1 p-1.5 rounded bg-[#0b0e14] border border-[#2b323d] flex items-center gap-1"
           >
             <input
@@ -339,6 +344,14 @@ export default function FileSidebar({
                 onCreateFolder(newFolderName.trim());
                 setNewFolderName("");
                 setCreatingFolder(false);
+              } else {
+                setCreatingFolder(false);
+              }
+            }}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setCreatingFolder(false);
+                setNewFolderName("");
               }
             }}
             className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#131820] border border-sky-500/50"
@@ -351,7 +364,11 @@ export default function FileSidebar({
               placeholder="Folder name..."
               autoFocus
               onKeyDown={(e) => {
-                if (e.key === "Escape") setCreatingFolder(false);
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setCreatingFolder(false);
+                  setNewFolderName("");
+                }
               }}
               className="flex-1 bg-transparent text-xs text-white outline-none min-w-0"
             />
