@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #0b0e14;
+  color: #e6edf3;
+}
+
+/* Custom sleek dark scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2b323d;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #424c5c;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* CodeMirror 6 container & gutter overrides */
+.cm-editor {
+  height: 100% !important;
+  outline: none !important;
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.cm-scroller {
+  overflow: auto !important;
+  font-family: inherit !important;
+  line-height: 1.6 !important;
+}
+
+.cm-gutters {
+  user-select: none;
+}
+
+.cm-bookmark-gutter {
+  width: 18px;
+  cursor: pointer;
+}
+
+.cm-bookmark-gutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 !important;
+}
+
+.cm-bookmark-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
+}
+
+.cm-search-match {
+  background-color: rgba(234, 179, 8, 0.28);
+  border-bottom: 1px solid rgba(234, 179, 8, 0.8);
+  border-radius: 2px;
+}
+
+.cm-search-match-active {
+  background-color: rgba(249, 115, 22, 0.6);
+  color: #ffffff !important;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.9);
+}
+
+.cm-foldGutter .cm-gutterElement {
+  padding: 0 4px !important;
+  color: #6e7681;
+  transition: color 0.15s;
+}
+
+.cm-foldGutter .cm-gutterElement:hover {
+  color: #e6edf3;
+}
