@@ -1828,7 +1828,7 @@ export default function VaultWorkspace() {
           ) : null}
 
           <span className="hidden md:inline text-[#6e7681]">
-            AES-256-GCM • {dbBackend === "turso" ? "Turso" : "Local SQLite"}
+            {dbBackend === "turso" ? "Synced" : "Offline"}
           </span>
         </div>
       </footer>

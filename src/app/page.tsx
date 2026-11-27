@@ -11,7 +11,6 @@ import {
   Loader2,
   Lock,
   Search,
-  ShieldCheck,
   Shuffle,
   UserPlus,
 } from "lucide-react";
@@ -60,7 +59,7 @@ function sanitizeUsername(val: string): string {
 const WELCOME_CONTENT = `# Welcome to SuperPad
 
 Your account and every note inside it are end-to-end encrypted in your browser
-with AES-256-GCM before syncing to Turso.
+before syncing across your devices.
 
 ## Quick Keyboard Shortcuts
 - Cmd/Ctrl + S         Save active note (creates an encrypted revision snapshot)
@@ -233,17 +232,6 @@ export default function HomePage() {
             <span className="font-semibold tracking-tight text-[15px] text-white">
               SuperPad
             </span>
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              v2 • Turso
-            </span>
-          </div>
-          <div className="flex items-center gap-3 text-xs text-[#8b949e]">
-            <span className="hidden sm:inline-flex items-center gap-1.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              Zero-Knowledge AES-256-GCM
-            </span>
-            <span className="hidden sm:inline text-[#30363d]">•</span>
-            <span className="hidden sm:inline">No Email Required</span>
           </div>
         </div>
       </header>
@@ -268,8 +256,7 @@ export default function HomePage() {
 
             <p className="text-[#8b949e] text-base leading-relaxed max-w-xl">
               Sign in with your username and master password to access all your
-              encrypted notes, folders, and tabs across every device. Powered by Turso
-              SQLite and split-key AES-256-GCM encryption.
+              notes, folders, and tabs across every device.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
@@ -459,7 +446,7 @@ export default function HomePage() {
       </main>
 
       <footer className="w-full py-4 text-center text-xs text-[#6e7681] border-t border-[#161b22]">
-        Split-Key PBKDF2-SHA-256 (200k rounds) + AES-256-GCM • Backed by Turso (libSQL)
+        SuperPad — Fast, private notepad &amp; code editor for the web
       </footer>
     </div>
   );
